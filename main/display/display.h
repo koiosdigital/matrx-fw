@@ -13,6 +13,17 @@
 
 #define DISPLAY_CONFIG_NAMESPACE "dispconf"
 
+struct DisplayStatusBar_t {
+    bool enabled = false;
+    uint8_t r = 0;
+    uint8_t g = 0;
+    uint8_t b = 0;
+} current_status_bar;
+
+typedef enum WebPTaskNotification_t {
+    WEBP_START = 1,
+} WebPTaskNotification_t;
+
 void display_init();
 void display_fill_rgb(uint8_t r, uint8_t g, uint8_t b);
 esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len);

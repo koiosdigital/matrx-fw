@@ -15,107 +15,84 @@ static const char* TAG = "display";
 uint16_t width = MATRIX_WIDTH;
 uint16_t height = MATRIX_HEIGHT;
 
-struct DisplayStatusBar_t {
-    bool enabled = false;
-    uint8_t r = 0;
-    uint8_t g = 0;
-    uint8_t b = 0;
-} current_status_bar;
-
-typedef enum WebPTaskNotification_t {
-    WEBP_STOP = 1,
-    WEBP_START = 2,
-} WebPTaskNotification_t;
-
-TaskHandle_t xWebPTask = nullptr;
+TaskHandle_t xDecoderTask = nullptr;
+SemaphoreHandle_t xWebPSemaphore = nullptr;
 
 WebPData webp_data = {
     .bytes = nullptr,
     .size = 0
 };
 
-void webp_task(void* pvParameter) {
-    WebPAnimDecoder* dec = nullptr;
+WebPAnimDecoder* dec = nullptr;
+WebPAnimInfo anim_info;
 
-    TickType_t animation_start_tick = 0;
-    TickType_t next_frame_tick = 0;
-    unsigned long current_frame_index = 0;
-    bool animation_started = false;
-
+void decoder_task(void* pvParameter) {
     WebPTaskNotification_t notification;
+    bool active = false;
+
+    TickType_t anim_start_tick = 0;
+    TickType_t next_frame_tick = 0;
+    uint8_t* frame_buffer = nullptr;
 
     while (1) {
-        TickType_t ticks_to_wait = animation_started ? pdMS_TO_TICKS(8) : portMAX_DELAY;
-
-        if (xTaskNotifyWait(0, ULONG_MAX, (uint32_t*)&notification, ticks_to_wait) == pdTRUE) {
+        //wait for notification, does not run if we're currently displaying a sprite on the display
+        if (!active && xTaskNotifyWait(0, ULONG_MAX, (uint32_t*)&notification, portMAX_DELAY) == pdTRUE) {
             if (notification == WebPTaskNotification_t::WEBP_START) {
-                if (dec != nullptr) {
-                    ESP_LOGD(TAG, "destroy decoder");
-                    WebPAnimDecoderDelete(dec);
-                    dec = nullptr;
-                }
-
-                if (webp_data.bytes == nullptr || webp_data.size == 0) {
-                    ESP_LOGE(TAG, "no sprite data");
-                    continue;
-                }
-
-                dec = WebPAnimDecoderNew(&webp_data, NULL);
-                current_frame_index = -1;
-                next_frame_tick = 0;
-            }
-            else if (notification == WebPTaskNotification_t::WEBP_STOP) {
-                if (dec != nullptr) {
-                    ESP_LOGD(TAG, "destroy decoder");
-                    WebPAnimDecoderDelete(dec);
-                    dec = nullptr;
-                }
+                ESP_LOGI(TAG, "decoder notified to start");
+                active = true;
             }
         }
 
-        //handle frame stepping
-        if (dec != nullptr) {
-            if (pdTICKS_TO_MS(xTaskGetTickCount()) - animation_start_tick >= next_frame_tick) {
-                if (current_frame_index == 0) {
-                    ESP_LOGD(TAG, "start animation");
-                    animation_start_tick = xTaskGetTickCount();
-                }
-
-                if (WebPAnimDecoderHasMoreFrames(dec)) {
-                    uint8_t* frame_buffer;
-                    int timestamp;
-                    if (WebPAnimDecoderGetNext(dec, &frame_buffer, &timestamp)) {
-                        ESP_LOGV(TAG, "frame %lu", current_frame_index);
-                        next_frame_tick = animation_start_tick + pdMS_TO_TICKS(timestamp);
-
-                        int px = 0;
-                        for (int y = 0; y < height; y++) {
-                            for (int x = 0; x < width; x++) {
-                                if (y = 0 && current_status_bar.enabled) {
-                                    dma_display->drawPixelRGB888(x, 0, current_status_bar.r, current_status_bar.g, current_status_bar.b);
-                                }
-                                else {
-                                    dma_display->drawPixelRGB888(x, y, frame_buffer[px * 4], frame_buffer[px * 4 + 1], frame_buffer[px * 4 + 2]);
-                                }
-                                px++;
-                            }
-                        }
-
-                        current_frame_index++;
-
-                        if (!WebPAnimDecoderHasMoreFrames(dec)) {
-                            ESP_LOGD(TAG, "animation end");
-                            current_frame_index = 0;
-                            WebPAnimDecoderReset(dec);
-                        }
-                    }
-                    else {
-                        ESP_LOGE(TAG, "frame decode failed");
-                        display_fill_rgb(0, 0, 0);
-                        xTaskNotify(xWebPTask, WebPTaskNotification_t::WEBP_STOP, eSetValueWithOverwrite);
-                    }
-                }
+        if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
+            //check if someone's destroyed our decoder
+            if (dec == nullptr) {
+                active = false;
+                continue;
             }
+
+            if (!WebPAnimDecoderHasMoreFrames(dec)) {
+                WebPAnimDecoderReset(dec);
+                anim_start_tick = 0;
+            }
+
+            int timestamp;
+
+            if (!WebPAnimDecoderGetNext(dec, &frame_buffer, &timestamp)) {
+                ESP_LOGE(TAG, "error getting next frame");
+                active = false;
+                continue;
+            }
+
+            if (anim_start_tick == 0) {
+                anim_start_tick = xTaskGetTickCount();
+            }
+
+            next_frame_tick = anim_start_tick + pdMS_TO_TICKS(timestamp);
+            xSemaphoreGive(xWebPSemaphore);
+        }
+
+        //wait until next frame tick has elapsed
+        if (xTaskGetTickCount() < next_frame_tick) {
+            vTaskDelayUntil(&next_frame_tick, pdMS_TO_TICKS(1));
+        }
+
+        //display the frame
+        if (frame_buffer == nullptr) {
+            ESP_LOGE(TAG, "frame buffer is null");
+            active = false;
+            continue;
+        }
+
+        int px = 0;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                dma_display->drawPixelRGB888(x, y, frame_buffer[px * 4], frame_buffer[px * 4 + 1], frame_buffer[px * 4 + 2]);
+                px++;
+            }
+        }
+
+        if (current_status_bar.enabled) {
+            dma_display->drawFastHLine(0, 0, width, current_status_bar.r, current_status_bar.g, current_status_bar.b);
         }
     }
 }
@@ -181,30 +158,48 @@ void display_init() {
     dma_display->setBrightness(32);
     dma_display->fillScreen(0);
 
-    xTaskCreatePinnedToCore(webp_task, "webp", 2048, NULL, 5, &xWebPTask, 0);
+    xWebPSemaphore = xSemaphoreCreateBinary();
+
+    xTaskCreatePinnedToCore(decoder_task, "decoder", 1024, NULL, 2, &xDecoderTask, 0);
 }
 
-void display_fill_rgb(uint8_t r, uint8_t g, uint8_t b) {
-    dma_display->fillScreenRGB888(r, g, b);
+void start_decoder() {
+    destroy_decoder();
+
+    if (webp_data.bytes == nullptr || webp_data.size == 0) {
+        ESP_LOGE(TAG, "no sprite data");
+        return;
+    }
+
+    dec = WebPAnimDecoderNew(&webp_data, NULL);
+    WebPAnimDecoderGetInfo(dec, &anim_info);
+    xTaskNotify(xDecoderTask, WebPTaskNotification_t::WEBP_START, eSetValueWithOverwrite);
+}
+
+void destroy_decoder() {
+    if (dec != nullptr) {
+        if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGD(TAG, "destroy decoder");
+            WebPAnimDecoderDelete(dec);
+            dec = nullptr;
+        }
+        xSemaphoreGive(xWebPSemaphore);
+    }
 }
 
 esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
-    xTaskNotify(xWebPTask, WebPTaskNotification_t::WEBP_STOP, eSetValueWithOverwrite);
+    destroy_decoder();
 
     webp_data.bytes = p_sprite_buf;
     webp_data.size = sprite_buf_len;
 
-    xTaskNotify(xWebPTask, WebPTaskNotification_t::WEBP_START, eSetValueWithOverwrite);
+    start_decoder();
 
     return ESP_OK;
 }
 
 void display_clear_status_bar() {
     current_status_bar.enabled = false;
-
-    for (int x = 0; x < width; x++) {
-        dma_display->drawPixelRGB888(x, 0, 0, 0, 0);
-    }
 }
 
 void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b) {
@@ -212,8 +207,4 @@ void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b) {
     current_status_bar.r = r;
     current_status_bar.g = g;
     current_status_bar.b = b;
-
-    for (int x = 0; x < width; x++) {
-        dma_display->drawPixelRGB888(x, 0, r, g, b);
-    }
 }
