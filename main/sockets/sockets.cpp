@@ -87,6 +87,10 @@ void sockets_task(void* pvParameter)
     size_t cert_len;
 
     esp_err_t err = crypto_get_device_cert(cert, &cert_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to get device cert");
+        return;
+    }
 
     esp_websocket_client_config_t websocket_cfg = {
         .uri = SOCKETS_URI,

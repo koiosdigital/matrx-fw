@@ -6,24 +6,25 @@
 #include <esp_event.h>
 #include <esp_log.h>
 #include <esp_wifi.h>
-
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
-
+#include <esp_random.h>
 #include <wifi_provisioning/manager.h>
 #include <wifi_provisioning/scheme_ble.h>
 
 #include <stdio.h>
 #include <string.h>
-#include <esp_random.h>
+
 #include "cJSON.h"
+#include "qrcode.h"
 
 #include "crypto.h"
+#include "display.h"
 
 static const char* TAG = "provisioning";
 
 char provisioning_device_name[32];
-char provisioning_qr_payload[128];
+char provisioning_qr_payload[64];
 char provisioning_pop_token[17];
 
 TaskHandle_t xProvisioningTask = nullptr;
@@ -34,6 +35,7 @@ typedef enum ProvisioningTaskNotification_t {
     RESET_PROVISIONING = 3,
     RESET_SM_ON_FAILURE = 4,
     PKI_PROV_ATTEMPT_ENROLL = 5,
+    DISPLAY_PROV_QR = 6,
 } ProvisioningTaskNotification_t;
 
 void prov_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
@@ -59,6 +61,9 @@ void prov_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id
         }
         case WIFI_PROV_START: {
             ESP_LOGI(TAG, "provisioning started");
+            if (xProvisioningTask != NULL) {
+                xTaskNotify(xProvisioningTask, ProvisioningTaskNotification_t::DISPLAY_PROV_QR, eSetValueWithOverwrite);
+            }
             break;
         }
         case WIFI_PROV_CRED_RECV: {
@@ -169,7 +174,7 @@ void pki_prov_start_enroll() {
                 cJSON* cert = cJSON_GetObjectItem(root, "cert");
 
                 if (cert != NULL) {
-                    char* cert_buffer = cJSON_PrintUnformatted(cert);
+                    char* cert_buffer = cert->valuestring;
 
                     ESP_LOGI(TAG, "PKI enrollment OK: cert len %d", strlen(cert_buffer));
                     crypto_set_device_cert(cert_buffer, strlen(cert_buffer));
@@ -198,6 +203,50 @@ exit:
     }
     if (csr_buffer != NULL) {
         free(csr_buffer);
+    }
+}
+
+void prov_display_qr_helper(esp_qrcode_handle_t qrcode) {
+    uint8_t* display_buffer = (uint8_t*)heap_caps_malloc(get_display_buffer_size(), MALLOC_CAP_SPIRAM);
+
+    if (display_buffer == NULL) {
+        ESP_LOGE(TAG, "malloc failed: display buffer");
+        return;
+    }
+
+    memset(display_buffer, 0, get_display_buffer_size());
+
+    //We want to center the QR code on the display
+    int qr_size = esp_qrcode_get_size(qrcode);
+    int w, h = 0;
+    get_display_dimensions(&w, &h);
+
+    int x_offset = (w - qr_size) / 2;
+    int y_offset = (h - qr_size) / 2;
+
+    for (int y = 0; y < qr_size; y++) {
+        for (int x = 0; x < qr_size; x++) {
+            if (!esp_qrcode_get_module(qrcode, x, y)) {
+                display_buffer[((y + y_offset) * w + (x + x_offset)) * 3] = 255;
+                display_buffer[((y + y_offset) * w + (x + x_offset)) * 3 + 1] = 255;
+                display_buffer[((y + y_offset) * w + (x + x_offset)) * 3 + 2] = 255;
+            }
+        }
+    }
+
+    display_raw_buffer(display_buffer, get_display_buffer_size());
+}
+
+void prov_display_qr() {
+    esp_qrcode_config_t qr_config = {
+        .display_func = prov_display_qr_helper,
+        .max_qrcode_version = 10,
+        .qrcode_ecc_level = ESP_QRCODE_ECC_LOW,
+    };
+
+    esp_err_t err = esp_qrcode_generate(&qr_config, get_provisioning_qr_payload());
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "QR code generation failed");
     }
 }
 
@@ -238,6 +287,9 @@ void provisioning_task(void* pvParameter) {
             case PKI_PROV_ATTEMPT_ENROLL:
                 pki_prov_start_enroll();
                 break;
+            case DISPLAY_PROV_QR:
+                prov_display_qr();
+                break;
             default:
                 break;
             }
@@ -263,7 +315,7 @@ void provisioning_init() {
     provisioning_pop_token[16] = '\0';
 
     //generate QR payload
-    snprintf(provisioning_qr_payload, 128, "{\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"ble\"}", provisioning_device_name, provisioning_pop_token);
+    snprintf(provisioning_qr_payload, 64, "%s;%s", provisioning_device_name, provisioning_pop_token);
 
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &prov_wifi_event_handler, NULL));

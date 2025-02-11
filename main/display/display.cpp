@@ -26,6 +26,13 @@ WebPData webp_data = {
 WebPAnimDecoder* dec = nullptr;
 WebPAnimInfo anim_info;
 
+DisplayStatusBar_t current_status_bar = {
+    .enabled = false,
+    .r = 0,
+    .g = 0,
+    .b = 0
+};
+
 void decoder_task(void* pvParameter) {
     WebPTaskNotification_t notification;
     bool active = false;
@@ -159,8 +166,18 @@ void display_init() {
     dma_display->fillScreen(0);
 
     xWebPSemaphore = xSemaphoreCreateBinary();
-
     xTaskCreatePinnedToCore(decoder_task, "decoder", 1024, NULL, 2, &xDecoderTask, 0);
+}
+
+void destroy_decoder() {
+    if (dec != nullptr) {
+        if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGD(TAG, "destroy decoder");
+            WebPAnimDecoderDelete(dec);
+            dec = nullptr;
+        }
+        xSemaphoreGive(xWebPSemaphore);
+    }
 }
 
 void start_decoder() {
@@ -176,17 +193,6 @@ void start_decoder() {
     xTaskNotify(xDecoderTask, WebPTaskNotification_t::WEBP_START, eSetValueWithOverwrite);
 }
 
-void destroy_decoder() {
-    if (dec != nullptr) {
-        if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGD(TAG, "destroy decoder");
-            WebPAnimDecoderDelete(dec);
-            dec = nullptr;
-        }
-        xSemaphoreGive(xWebPSemaphore);
-    }
-}
-
 esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
     destroy_decoder();
 
@@ -198,6 +204,27 @@ esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
     return ESP_OK;
 }
 
+void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
+    destroy_decoder();
+
+    webp_data.bytes = nullptr;
+    webp_data.size = 0;
+
+    dma_display->fillScreen(0);
+
+    if (raw_buf_len != width * height * 3) {
+        ESP_LOGE(TAG, "raw buffer size mismatch");
+        return;
+    }
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int px = (y * width + x) * 3;
+            dma_display->drawPixelRGB888(x, y, p_raw_buf[px], p_raw_buf[px + 1], p_raw_buf[px + 2]);
+        }
+    }
+}
+
 void display_clear_status_bar() {
     current_status_bar.enabled = false;
 }
@@ -207,4 +234,13 @@ void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b) {
     current_status_bar.r = r;
     current_status_bar.g = g;
     current_status_bar.b = b;
+}
+
+size_t get_display_buffer_size() {
+    return width * height * 3;
+}
+
+void get_display_dimensions(int* w, int* h) {
+    *w = width;
+    *h = height;
 }
