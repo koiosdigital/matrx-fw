@@ -28,7 +28,7 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id
             }
 
             esp_wifi_connect();
-            show_fs_sprite("connect_wifi.webp");
+            show_fs_sprite("/fs/connect_wifi.webp");
             break;
         }
         case WIFI_EVENT_STA_DISCONNECTED: {

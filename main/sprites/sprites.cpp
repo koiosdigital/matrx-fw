@@ -25,16 +25,21 @@ void sprites_init() {
     ESP_ERROR_CHECK(esp_vfs_littlefs_register(&conf));
 }
 
-void sprites_update(uint16_t id, uint8_t* data, size_t len) {
+void sprites_update(uint32_t id, const char* uuid, uint8_t* data, size_t len) {
     RAMSprite_t* current = sprites_head;
     RAMSprite_t* prev = nullptr;
 
     while (current != nullptr) {
-        if (current->id == id) {
+        if (strcmp(current->uuid, uuid) == 0) {
             //update the sprite
-            free(current->data);
-            current->data = data;
+            if (current->data != nullptr) {
+                free(current->data);
+            }
+
+            current->data = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
             current->len = len;
+            memcpy(current->data, data, len);
+
             return;
         }
 
@@ -44,9 +49,14 @@ void sprites_update(uint16_t id, uint8_t* data, size_t len) {
 
     //create a new sprite
     RAMSprite_t* new_sprite = (RAMSprite_t*)malloc(sizeof(RAMSprite_t));
-    new_sprite->id = id;
-    new_sprite->data = data;
+
+    new_sprite->uuid = (char*)malloc(strlen(uuid) + 1);
+    strcpy(new_sprite->uuid, uuid);
+
+    new_sprite->data = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
     new_sprite->len = len;
+    memcpy(new_sprite->data, data, len);
+
     new_sprite->next = nullptr;
 
     if (prev == nullptr) {
@@ -57,11 +67,11 @@ void sprites_update(uint16_t id, uint8_t* data, size_t len) {
     }
 }
 
-RAMSprite_t* sprites_get(uint16_t id) {
-    //find the sprite with the given id
+RAMSprite_t* sprites_get(const char* uuid) {
+    //find the sprite with the given uuid
     RAMSprite_t* current = sprites_head;
     while (current != nullptr) {
-        if (current->id == id) {
+        if (strcmp(current->uuid, uuid) == 0) {
             return current;
         }
 
@@ -69,6 +79,35 @@ RAMSprite_t* sprites_get(uint16_t id) {
     }
 
     return nullptr;
+}
+
+RAMSprite_t* sprites_get_head() {
+    return sprites_head;
+}
+
+void delete_sprite(const char* uuid) {
+    RAMSprite_t* current = sprites_head;
+    RAMSprite_t* prev = nullptr;
+
+    while (current != nullptr) {
+        if (strcmp(current->uuid, uuid) == 0) {
+            if (prev == nullptr) {
+                sprites_head = current->next;
+            }
+            else {
+                prev->next = current->next;
+            }
+
+            free(current->uuid);
+            free(current->data);
+            free(current);
+
+            return;
+        }
+
+        prev = current;
+        current = current->next;
+    }
 }
 
 void show_fs_sprite(const char* filename) {
@@ -103,8 +142,8 @@ void show_fs_sprite(const char* filename) {
     display_sprite(fs_sprite_buf, len);
 }
 
-void show_ram_sprite(uint16_t id) {
-    RAMSprite_t* sprite = sprites_get(id);
+void show_ram_sprite(const char* uuid) {
+    RAMSprite_t* sprite = sprites_get(uuid);
     if (sprite == nullptr) {
         ESP_LOGE(TAG, "sprite not found");
         return;

@@ -7,6 +7,10 @@
 
 #include "crypto.h"
 #include "display.h"
+#include "scheduler.h"
+#include "sprites.h"
+
+#include "matrx.pb-c.h"
 
 static const char* TAG = "sockets";
 TaskHandle_t xSocketsTask = nullptr;
@@ -28,11 +32,16 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "connected");
-        display_clear_status_bar();
+        if (!scheduler_has_schedule()) {
+            show_fs_sprite("/fs/ready.webp");
+            request_schedule();
+        }
+        scheduler_resume();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "disconnected");
-        display_set_status_bar(255, 0, 0);
+        scheduler_pause();
+        show_fs_sprite("/fs/connect_cloud.webp");
         break;
     case WEBSOCKET_EVENT_DATA:
         ESP_LOGI(TAG, "WEBSOCKET_EVENT_DATA");
@@ -65,6 +74,57 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
             }
         }
 
+        break;
+    }
+}
+
+void handle_schedule_response(Matrx__ScheduleResponse* response)
+{
+    if (response->n_schedule_items == 0) {
+        ESP_LOGI(TAG, "no schedule items");
+        return;
+    }
+}
+
+void handle_render_response(Matrx__RenderResponse* response)
+{
+    ESP_LOGI(TAG, "received render response");
+}
+
+void handle_pin_schedule_item(Matrx__PinScheduleItem* pin)
+{
+    ESP_LOGI(TAG, "received pin schedule item");
+}
+
+void handle_skip_schedule_item(Matrx__SkipScheduleItem* skip)
+{
+    ESP_LOGI(TAG, "received skip schedule item");
+}
+
+void handle_message(Matrx__SocketMessage* message)
+{
+    switch (message->message_case) {
+    case MATRX__SOCKET_MESSAGE__MESSAGE_SCHEDULE_RESPONSE:
+        ESP_LOGI(TAG, "received schedule response message");
+        handle_schedule_response(message->schedule_response);
+        break;
+    case MATRX__SOCKET_MESSAGE__MESSAGE_RENDER_RESPONSE:
+        ESP_LOGI(TAG, "received render response message");
+        handle_render_response(message->render_response);
+        break;
+    case MATRX__SOCKET_MESSAGE__MESSAGE_RESTART:
+        ESP_LOGI(TAG, "received restart message");
+        esp_restart();
+        break;
+    case MATRX__SOCKET_MESSAGE__MESSAGE_PIN_SCHEDULE_ITEM:
+        ESP_LOGI(TAG, "received pin schedule item message");
+        handle_pin_schedule_item(message->pin_schedule_item);
+        break;
+    case MATRX__SOCKET_MESSAGE__MESSAGE_SKIP_SCHEDULE_ITEM:
+        ESP_LOGI(TAG, "received skip schedule item message");
+        handle_skip_schedule_item(message->skip_schedule_item);
+        break;
+    default:
         break;
     }
 }
@@ -117,12 +177,21 @@ void sockets_task(void* pvParameter)
             if (message.is_outbox) {
                 ESP_LOGI(TAG, "sending message with length %d", message.message_len);
                 esp_websocket_client_send_text(client, message.message, message.message_len, pdMS_TO_TICKS(1000));
+                free(message.message);
             }
             else {
                 ESP_LOGI(TAG, "received message with length %d", message.message_len);
                 for (int i = 0; i < message.message_len; i++) {
                     ESP_LOGI(TAG, "%c", message.message[i]);
                 }
+
+                Matrx__SocketMessage* socket_message = matrx__socket_message__unpack(NULL, message.message_len, (uint8_t*)message.message);
+                if (socket_message == NULL) {
+                    ESP_LOGE(TAG, "failed to unpack socket message");
+                    free(message.message);
+                    continue;
+                }
+                handle_message(socket_message);
             }
         }
     }
@@ -145,5 +214,81 @@ void sockets_disconnect()
 {
     if (client != nullptr) {
         esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
+    }
+}
+
+void request_render(uint8_t* schedule_item_uuid) {
+    Matrx__RequestRender request = MATRX__REQUEST_RENDER__INIT;
+    request.schedule_item_uuid.data = schedule_item_uuid;
+    request.schedule_item_uuid.len = 16;
+
+    Matrx__SocketMessage message = MATRX__SOCKET_MESSAGE__INIT;
+    message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_REQUEST_RENDER;
+    message.request_render = &request;
+
+    size_t len = matrx__socket_message__get_packed_size(&message);
+    uint8_t* buffer = (uint8_t*)malloc(len);
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "failed to allocate message buffer");
+        return;
+    }
+
+    ProcessableMessage_t p_message;
+    p_message.message = (char*)buffer;
+    p_message.message_len = len;
+    p_message.is_outbox = true;
+
+    if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGE(TAG, "failed to send message to queue");
+    }
+}
+
+void upload_coredump(uint8_t* core_dump, size_t core_dump_len) {
+    Matrx__UploadCoreDump upload = MATRX__UPLOAD_CORE_DUMP__INIT;
+    upload.core_dump.data = core_dump;
+    upload.core_dump.len = core_dump_len;
+
+    Matrx__SocketMessage message = MATRX__SOCKET_MESSAGE__INIT;
+    message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
+    message.upload_core_dump = &upload;
+
+    size_t len = matrx__socket_message__get_packed_size(&message);
+    uint8_t* buffer = (uint8_t*)malloc(len);
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "failed to allocate message buffer");
+        return;
+    }
+
+    ProcessableMessage_t p_message;
+    p_message.message = (char*)buffer;
+    p_message.message_len = len;
+    p_message.is_outbox = true;
+
+    if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGE(TAG, "failed to send message to queue");
+    }
+}
+
+void request_schedule() {
+    Matrx__RequestSchedule request = MATRX__REQUEST_SCHEDULE__INIT;
+
+    Matrx__SocketMessage message = MATRX__SOCKET_MESSAGE__INIT;
+    message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_REQUEST_SCHEDULE;
+    message.request_schedule = &request;
+
+    size_t len = matrx__socket_message__get_packed_size(&message);
+    uint8_t* buffer = (uint8_t*)malloc(len);
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "failed to allocate message buffer");
+        return;
+    }
+
+    ProcessableMessage_t p_message;
+    p_message.message = (char*)buffer;
+    p_message.message_len = len;
+    p_message.is_outbox = true;
+
+    if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGE(TAG, "failed to send message to queue");
     }
 }

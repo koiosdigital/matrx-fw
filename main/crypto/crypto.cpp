@@ -22,6 +22,7 @@
 
 #include "string.h"
 #include "stdlib.h"
+#include "display.h"
 
 static const char* TAG = "crypto";
 CryptoState_t crypto_state = CRYPTO_STATE_UNINITIALIZED;
@@ -39,6 +40,7 @@ void crypto_generate_key(void* pvParameter) {
 
 
     ESP_LOGD(TAG, "gen RSA key: %d bits", KEY_SIZE);
+    display_set_status_bar(0, 0, 255);
 
     esp_task_wdt_config_t twdt_config = {
         .timeout_ms = 100000,
@@ -231,6 +233,7 @@ esp_err_t crypto_keygen_if_needed() {
 
     // get RSA keypair
     xTaskCreatePinnedToCore(crypto_generate_key, "crypto_keygen", 4096, (void*)&rsa, 5, NULL, 1);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     while (xSemaphoreTake(keygen_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         ESP_LOGI(TAG, "waiting for keygen");
@@ -301,6 +304,8 @@ esp_err_t crypto_keygen_if_needed() {
     ESP_ERROR_CHECK(error);
     nvs_close(handle);
 
+    display_set_status_bar(0, 255, 255);
+
     error = crypto_store_csr(&rsa, handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "store csr failed");
@@ -322,6 +327,10 @@ esp_err_t crypto_keygen_if_needed() {
         ESP_LOGE(TAG, "read protect failed");
         goto exit;
     }
+
+    display_set_status_bar(0, 255, 0);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    display_clear_status_bar();
 
     return error;
 
