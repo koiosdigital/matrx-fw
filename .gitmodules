@@ -4,3 +4,6 @@
 [submodule "components/ESP32-HUB75-MatrixPanel-DMA"]
 	path = components/ESP32-HUB75-MatrixPanel-DMA
 	url = https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA
+[submodule "components/MATRX-protobufs"]
+	path = components/MATRX-protobufs
+	url = https://github.com/koiosdigital/MATRX-protobufs
