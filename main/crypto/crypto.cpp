@@ -199,7 +199,7 @@ esp_err_t crypto_store_csr(mbedtls_rsa_context* rsa, nvs_handle_t handle) {
     mbedtls_x509write_csr_free(&req);
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);
-    free(&csr_buffer);
+    free(csr_buffer);
 
     return error;
 }
@@ -282,7 +282,7 @@ esp_err_t crypto_keygen_if_needed() {
 
     //open nvs handle
     nvs_handle handle;
-    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
+    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;
@@ -356,7 +356,7 @@ esp_ds_data_ctx_t* crypto_get_ds_data_ctx(void)
         goto exit;
     }
 
-    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
+    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;
@@ -406,7 +406,7 @@ esp_err_t crypto_get_csr(char* buffer, size_t* len) {
     esp_err_t error;
     nvs_handle handle;
 
-    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
+    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         return error;
@@ -426,7 +426,7 @@ esp_err_t crypto_clear_csr() {
     esp_err_t error;
     nvs_handle handle;
 
-    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
+    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;
@@ -453,7 +453,7 @@ esp_err_t crypto_get_device_cert(char* buffer, size_t* len) {
     esp_err_t error;
     nvs_handle handle;
 
-    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
+    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;
@@ -474,7 +474,7 @@ esp_err_t crypto_set_device_cert(char* buffer, size_t len) {
     esp_err_t error;
     nvs_handle handle;
 
-    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
+    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;

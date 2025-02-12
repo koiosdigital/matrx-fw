@@ -11,6 +11,9 @@
 #include "wifi.h"
 #include "provisioning.h"
 #include "display.h"
+#include "sockets.h"
+#include "sprites.h"
+#include "ota.h"
 
 static const char* TAG = "matrx";
 
@@ -28,12 +31,22 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    //also initialize factory NVS partition
+    ret = nvs_flash_init_partition(NVS_CRYPTO_PARTITION);
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase_partition(NVS_CRYPTO_PARTITION));
+        ret = nvs_flash_init_partition(NVS_CRYPTO_PARTITION);
+    }
+
+    sprites_init();
     display_init();
 
     provisioning_init();
     wifi_init();
+    sockets_init();
 
     crypto_init();
+    ota_init();
 
     while (1) {
         ESP_LOGI(TAG, "Hello world!");

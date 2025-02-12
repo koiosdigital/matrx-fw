@@ -4,6 +4,7 @@
 #include "esp_err.h"
 #include "esp_ds.h"
 
+#define NVS_CRYPTO_PARTITION "nvs_factory"
 #define NVS_CRYPTO_NAMESPACE "secure_crypto"
 
 #define NVS_CRYPTO_DEVICE_CERT "dev_cert"

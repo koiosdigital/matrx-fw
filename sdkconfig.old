@@ -2370,13 +2370,6 @@ CONFIG_WIFI_PROV_STA_FAST_SCAN=y
 # end of Wi-Fi Provisioning Manager
 
 #
-# ESP Secure Cert Manager
-#
-CONFIG_ESP_SECURE_CERT_DS_PERIPHERAL=y
-# CONFIG_ESP_SECURE_CERT_SUPPORT_LEGACY_FORMATS is not set
-# end of ESP Secure Cert Manager
-
-#
 # ESP WebSocket client
 #
 CONFIG_ESP_WS_CLIENT_ENABLE_DYNAMIC_BUFFER=y

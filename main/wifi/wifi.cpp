@@ -9,6 +9,8 @@
 #include <string.h>
 
 #include "provisioning.h"
+#include "sprites.h"
+#include "sockets.h"
 
 static const char* TAG = "wifi";
 
@@ -17,29 +19,28 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id
     if (event_base == WIFI_EVENT) {
         switch (event_id) {
         case WIFI_EVENT_STA_START: {
-            ESP_LOGI(TAG, "STA started");
-
-            /* check if device has been provisioned */
             wifi_config_t wifi_cfg;
             esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg);
-            if (strlen((const char*)wifi_cfg.sta.ssid)) {
-                esp_wifi_connect();
-            }
-            else {
+
+            if (!strlen((const char*)wifi_cfg.sta.ssid)) {
                 start_provisioning();
+                break;
             }
+
+            esp_wifi_connect();
+            show_fs_sprite("connect_wifi.webp");
             break;
         }
         case WIFI_EVENT_STA_DISCONNECTED: {
             wifiConnectionAttempts++;
-            ESP_LOGI(TAG, "STA disconnected");
+            ESP_LOGW(TAG, "disconnected");
 
-            //TODO: disconnect from wss
+            sockets_disconnect();
 
             if (wifiConnectionAttempts > 5) {
                 start_provisioning();
             }
-            ESP_LOGI(TAG, "STA reconnecting..");
+
             esp_wifi_connect();
             break;
         }
@@ -48,11 +49,8 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id
     else if (event_base == IP_EVENT) {
         if (event_id == IP_EVENT_STA_GOT_IP) {
             wifiConnectionAttempts = 0;
-            ESP_LOGI(TAG, "STA connected!");
-
             stop_provisioning();
-
-            //TODO: reconnect to wss
+            sockets_connect();
         }
     }
 }

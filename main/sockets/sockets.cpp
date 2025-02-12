@@ -12,6 +12,7 @@ static const char* TAG = "sockets";
 TaskHandle_t xSocketsTask = nullptr;
 
 QueueHandle_t xSocketsQueue = nullptr;
+esp_websocket_client_handle_t client = nullptr;
 
 typedef struct ProcessableMessage_t {
     char* message;
@@ -101,9 +102,8 @@ void sockets_task(void* pvParameter)
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
-    esp_websocket_client_handle_t client = esp_websocket_client_init(&websocket_cfg);
+    client = esp_websocket_client_init(&websocket_cfg);
     esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void*)client);
-    esp_websocket_client_start(client);
 
     ProcessableMessage_t message;
 
@@ -132,4 +132,18 @@ void sockets_init()
 {
     xSocketsQueue = xQueueCreate(10, sizeof(ProcessableMessage_t));
     xTaskCreatePinnedToCore(sockets_task, "sockets", 2048, NULL, 5, &xSocketsTask, 1);
+}
+
+void sockets_connect()
+{
+    if (client != nullptr) {
+        esp_websocket_client_start(client);
+    }
+}
+
+void sockets_disconnect()
+{
+    if (client != nullptr) {
+        esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
+    }
 }
