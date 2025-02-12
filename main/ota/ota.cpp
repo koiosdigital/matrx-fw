@@ -88,11 +88,6 @@ void ota_timer_handler(void* pvParameter) {
         memset(response, 0, 512);
 
         response_len = esp_http_client_read(http_client, response, 512);
-        if (response_len <= 0) {
-            ESP_LOGE(TAG, "HTTP GET response read failed");
-            goto exit;
-        }
-
         root = cJSON_Parse(response);
         if (root == NULL) {
             ESP_LOGE(TAG, "failed to parse JSON");
@@ -100,11 +95,6 @@ void ota_timer_handler(void* pvParameter) {
         }
 
         latest = cJSON_GetObjectItem(root, "version");
-        if (latest == NULL || latest->valuestring == NULL) {
-            ESP_LOGE(TAG, "latest version not found");
-            goto exit;
-        }
-
         semver_parse_version(latest->valuestring, &latest_version);
 
         if (semver_compare(latest_version, current_version) != 1) {
@@ -113,16 +103,7 @@ void ota_timer_handler(void* pvParameter) {
         }
 
         bin = cJSON_GetObjectItem(root, "bin");
-        if (bin == NULL || bin->valuestring == NULL) {
-            ESP_LOGE(TAG, "bin not found");
-            goto exit;
-        }
-
         host = cJSON_GetObjectItem(root, "host");
-        if (host == NULL || host->valuestring == NULL) {
-            ESP_LOGE(TAG, "host not found");
-            goto exit;
-        }
 
         snprintf(binURL, 256, "https://%s%s", host->valuestring, bin->valuestring);
 
