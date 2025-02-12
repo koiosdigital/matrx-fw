@@ -111,10 +111,7 @@ void ota_timer_handler(void* pvParameter) {
 
     exit:
         esp_http_client_cleanup(http_client);
-        if (response != NULL) {
-            free(response);
-        }
-
+        free(response);
         vTaskDelay(pdMS_TO_TICKS(1000 * 60 * 60 * 6));
     }
 }

@@ -335,12 +335,8 @@ esp_err_t crypto_keygen_if_needed() {
     return error;
 
 exit:
-    if (params != NULL) {
-        free(params);
-    }
-    if (encrypted != NULL) {
-        free(encrypted);
-    }
+    free(params);
+    free(encrypted);
     mbedtls_mpi_free(&rinv);
     mbedtls_rsa_free(&rsa);
     return error;
@@ -401,9 +397,7 @@ esp_ds_data_ctx_t* crypto_get_ds_data_ctx(void)
     return ds_data_ctx;
 
 exit:
-    if (ds_data_ctx != NULL) {
-        free(ds_data_ctx->esp_ds_data);
-    }
+    free(ds_data_ctx->esp_ds_data);
     if (handle != 0) {
         nvs_close(handle);
     }

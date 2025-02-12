@@ -11,6 +11,8 @@
 #include "sprites.h"
 
 #include "matrx.pb-c.h"
+#include <esp_partition.h>
+#include <mbedtls/base64.h>
 
 static const char* TAG = "sockets";
 TaskHandle_t xSocketsTask = nullptr;
@@ -36,6 +38,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
             show_fs_sprite("/fs/ready.webp");
             request_schedule();
         }
+        attempt_coredump_upload();
         scheduler_resume();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
@@ -47,9 +50,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
         ESP_LOGI(TAG, "WEBSOCKET_EVENT_DATA");
 
         if (data->payload_offset == 0) {
-            if (dbuf) {
-                free(dbuf);
-            }
+            free(dbuf);
             dbuf = (char*)malloc(data->payload_len + 1);
             if (dbuf == NULL) {
                 ESP_LOGE(TAG, "malloc failed: dbuf (%d)", data->payload_len);
@@ -291,4 +292,80 @@ void request_schedule() {
     if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
         ESP_LOGE(TAG, "failed to send message to queue");
     }
+}
+
+void attempt_coredump_upload() {
+    ESP_LOGI(TAG, "attempting coredump upload");
+
+    // Find the coredump partition
+    const esp_partition_t* core_dump_partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, "coredump");
+
+    if (!core_dump_partition)
+    {
+        return;
+    }
+
+    // Read the core dump size
+    size_t core_dump_size = core_dump_partition->size;
+
+    size_t encoded_size = 0;
+    uint8_t* encoded_data;
+    bool is_erased = true;
+
+    uint8_t* core_dump_data = (uint8_t*)heap_caps_malloc(core_dump_size + 1, MALLOC_CAP_SPIRAM); // used as return, so freed in calling function
+    if (!core_dump_data)
+    {
+        ESP_LOGE(TAG, "Failed to allocate memory for core dump");
+        goto exit;
+    }
+    if (esp_partition_read(core_dump_partition, 0, core_dump_data, core_dump_size) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to read core dump data");
+        goto exit;
+    }
+
+    //if coredump is all 0xFF, then it's erased
+    for (size_t i = 0; i < core_dump_size; i++)
+    {
+        if (core_dump_data[i] != 0xFF)
+        {
+            is_erased = false;
+            break;
+        }
+    }
+
+    if (is_erased)
+    {
+        ESP_LOGI(TAG, "Core dump partition is empty");
+        goto exit;
+    }
+
+    // Calculate Base64 encoded size
+    mbedtls_base64_encode(NULL, 0, &encoded_size, core_dump_data, core_dump_size);
+    encoded_data = (uint8_t*)heap_caps_malloc(encoded_size + 1, MALLOC_CAP_SPIRAM); // used as return, so freed in calling function
+    if (!encoded_data)
+    {
+        ESP_LOGE(TAG, "Failed to allocate memory for encoded data");
+        goto exit;
+    }
+
+    // Encode core dump to Base64
+    if (mbedtls_base64_encode(encoded_data, encoded_size, &encoded_size, core_dump_data, core_dump_size) != 0)
+    {
+        goto exit;
+    }
+
+    encoded_data[encoded_size] = '\0'; // Null-terminate the Base64 string
+    upload_coredump(encoded_data, encoded_size);
+
+    //clear the coredump partition
+    if (esp_partition_erase_range(core_dump_partition, 0, core_dump_size) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to erase core dump partition");
+    }
+
+exit:
+    free(core_dump_data);
+    free(encoded_data);
 }

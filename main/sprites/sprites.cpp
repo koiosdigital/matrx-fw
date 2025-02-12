@@ -32,10 +32,8 @@ void sprites_update(uint32_t id, const char* uuid, uint8_t* data, size_t len) {
     while (current != nullptr) {
         if (strcmp(current->uuid, uuid) == 0) {
             //update the sprite
-            if (current->data != nullptr) {
-                free(current->data);
-            }
 
+            free(current->data);
             current->data = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
             current->len = len;
             memcpy(current->data, data, len);
@@ -123,10 +121,8 @@ void show_fs_sprite(const char* filename) {
     size_t len = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    if (fs_sprite_buf != nullptr) {
-        free(fs_sprite_buf);
-        fs_sprite_buf = nullptr;
-    }
+    free(fs_sprite_buf);
+    fs_sprite_buf = nullptr;
 
     //read the file
     fs_sprite_buf = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
@@ -151,8 +147,6 @@ void show_ram_sprite(const char* uuid) {
 
     display_sprite(sprite->data, sprite->len);
 
-    if (fs_sprite_buf != nullptr) {
-        free(fs_sprite_buf);
-        fs_sprite_buf = nullptr;
-    }
+    free(fs_sprite_buf);
+    fs_sprite_buf = nullptr;
 }
