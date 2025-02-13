@@ -2,8 +2,10 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
+set(PROJECT_VER "1.0.0")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(MATRX-fw)
+
 
 # Create a LittleFS image from the contents of the 'fs_image' directory
 # that fits the partition named 'littlefs'. The generated image should be flashed
