@@ -9,21 +9,21 @@
 
 #include "nvs_flash.h"
 
-MatrixPanel_I2S_DMA* dma_display = nullptr;
+MatrixPanel_I2S_DMA* dma_display = NULL;
 static const char* TAG = "display";
 
 uint16_t width = MATRIX_WIDTH;
 uint16_t height = MATRIX_HEIGHT;
 
-TaskHandle_t xDecoderTask = nullptr;
-SemaphoreHandle_t xWebPSemaphore = nullptr;
+TaskHandle_t xDecoderTask = NULL;
+SemaphoreHandle_t xWebPSemaphore = NULL;
 
 WebPData webp_data = {
-    .bytes = nullptr,
+    .bytes = NULL,
     .size = 0
 };
 
-WebPAnimDecoder* dec = nullptr;
+WebPAnimDecoder* dec = NULL;
 WebPAnimInfo anim_info;
 
 DisplayStatusBar_t current_status_bar = {
@@ -39,7 +39,7 @@ void decoder_task(void* pvParameter) {
 
     TickType_t anim_start_tick = 0;
     TickType_t next_frame_tick = 0;
-    uint8_t* frame_buffer = nullptr;
+    uint8_t* frame_buffer = NULL;
 
     while (1) {
         //wait for notification, does not run if we're currently displaying a sprite on the display
@@ -52,7 +52,7 @@ void decoder_task(void* pvParameter) {
 
         if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
             //check if someone's destroyed our decoder
-            if (dec == nullptr) {
+            if (dec == NULL) {
                 active = false;
                 continue;
             }
@@ -84,7 +84,7 @@ void decoder_task(void* pvParameter) {
         }
 
         //display the frame
-        if (frame_buffer == nullptr) {
+        if (frame_buffer == NULL) {
             ESP_LOGE(TAG, "frame buffer is null");
             active = false;
             continue;
@@ -170,11 +170,11 @@ void display_init() {
 }
 
 void destroy_decoder() {
-    if (dec != nullptr) {
+    if (dec != NULL) {
         if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
             ESP_LOGD(TAG, "destroy decoder");
             WebPAnimDecoderDelete(dec);
-            dec = nullptr;
+            dec = NULL;
         }
         xSemaphoreGive(xWebPSemaphore);
     }
@@ -183,7 +183,7 @@ void destroy_decoder() {
 void start_decoder() {
     destroy_decoder();
 
-    if (webp_data.bytes == nullptr || webp_data.size == 0) {
+    if (webp_data.bytes == NULL || webp_data.size == 0) {
         ESP_LOGE(TAG, "no sprite data");
         return;
     }
@@ -204,10 +204,12 @@ esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
     return ESP_OK;
 }
 
+//Display a raw framebuffer on the screen. Stops the WebP decoder.
+//Buffer is expected to be in RGB format. Buffer is freed after display.
 void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
     destroy_decoder();
 
-    webp_data.bytes = nullptr;
+    webp_data.bytes = NULL;
     webp_data.size = 0;
 
     dma_display->fillScreen(0);
@@ -223,6 +225,8 @@ void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
             dma_display->drawPixelRGB888(x, y, p_raw_buf[px], p_raw_buf[px + 1], p_raw_buf[px + 2]);
         }
     }
+
+    free(p_raw_buf);
 }
 
 void display_clear_status_bar() {

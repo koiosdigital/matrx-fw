@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_app_format.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
 
 #include "semver.h"
 #include "cJSON.h"
@@ -17,21 +18,10 @@ esp_http_client_config_t config = {
     .crt_bundle_attach = esp_crt_bundle_attach,
 };
 
-esp_http_client_handle_t http_client;
-char* response = nullptr;
-int status_code = 0;
-int response_len = 0;
-esp_err_t err;
-char binURL[256];
-
-cJSON* root, * latest, * bin, * host = NULL;
-semver_t current_version, latest_version;
-
 void do_ota(void* pvParameter) {
     char* binURL = (char*)pvParameter;
 
     if (binURL == NULL) {
-        ESP_LOGE(TAG, "binURL is null");
         return;
     }
 
@@ -45,77 +35,107 @@ void do_ota(void* pvParameter) {
     };
 
     esp_err_t err = esp_https_ota(&ota_config);
+    free(binURL);
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "update failed: %s", esp_err_to_name(err));
+        return;
     }
-    else {
-        ESP_LOGI(TAG, "OTA successful");
-        esp_restart();
-    }
+
+    ESP_LOGI(TAG, "update successful");
+    esp_restart();
 }
 
 void ota_timer_handler(void* pvParameter) {
-    vTaskDelay(pdMS_TO_TICKS(1000 * 60 * 5)); // wait 5 minutes before starting OTA
+    ESP_LOGI(TAG, "checking for updates");
 
-    while (1) {
-        http_client = esp_http_client_init(&config);
+    esp_http_client_handle_t http_client;
+    char* response = NULL;
+    char* binURL = NULL;
+    int status_code = 0;
+    int response_len = 0;
+    esp_err_t err = ESP_OK;
 
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "failed to get partition description");
-            goto exit;
-        }
+    cJSON* root, * latest, * bin, * host = NULL;
+    semver_t current_version, latest_version;
 
-        semver_parse_version(esp_app_get_description()->version, &current_version);
+    semver_parse_version(esp_app_get_description()->version, &current_version);
 
-        err = esp_http_client_perform(http_client);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
-            goto exit;
-        }
+    http_client = esp_http_client_init(&config);
 
-        status_code = esp_http_client_get_status_code(http_client);
-        if (status_code != 200) {
-            ESP_LOGE(TAG, "HTTP GET request failed: %d", status_code);
-            goto exit;
-        }
-
-        response = (char*)heap_caps_malloc(512, MALLOC_CAP_SPIRAM);
-        if (response == NULL) {
-            ESP_LOGE(TAG, "malloc failed: response");
-            goto exit;
-        }
-        memset(response, 0, 512);
-
-        response_len = esp_http_client_read(http_client, response, 512);
-        root = cJSON_Parse(response);
-        if (root == NULL) {
-            ESP_LOGE(TAG, "failed to parse JSON");
-            goto exit;
-        }
-
-        latest = cJSON_GetObjectItem(root, "version");
-        semver_parse_version(latest->valuestring, &latest_version);
-
-        if (semver_compare(latest_version, current_version) != 1) {
-            ESP_LOGI(TAG, "no update available");
-            goto exit;
-        }
-
-        bin = cJSON_GetObjectItem(root, "bin");
-        host = cJSON_GetObjectItem(root, "host");
-
-        snprintf(binURL, 256, "https://%s%s", host->valuestring, bin->valuestring);
-
-        xTaskCreate(do_ota, "ota_task", 4096, &binURL, 5, NULL);
-
-    exit:
-        esp_http_client_cleanup(http_client);
-        free(response);
-        vTaskDelay(pdMS_TO_TICKS(1000 * 60 * 60 * 6));
+    err = esp_http_client_perform(http_client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "http request failed: %s", esp_err_to_name(err));
+        goto exit;
     }
+
+    status_code = esp_http_client_get_status_code(http_client);
+    if (status_code != 200) {
+        goto exit;
+    }
+
+    response = (char*)calloc(sizeof(char), 512);
+    if (response == NULL) {
+        ESP_LOGE(TAG, "malloc failed: response");
+        goto exit;
+    }
+
+    response_len = esp_http_client_read(http_client, response, 512);
+    root = cJSON_Parse(response);
+    if (root == NULL) {
+        ESP_LOGE(TAG, "failed to parse JSON");
+        goto exit;
+    }
+
+    latest = cJSON_GetObjectItem(root, "version");
+    if (latest == NULL) {
+        ESP_LOGE(TAG, "failed to get latest version");
+        goto exit;
+    }
+
+    err = semver_parse_version(latest->valuestring, &latest_version);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to parse latest version");
+        goto exit;
+    }
+
+    if (semver_compare(latest_version, current_version) != 1) {
+        ESP_LOGI(TAG, "no update available");
+        goto exit;
+    }
+
+    bin = cJSON_GetObjectItem(root, "bin");
+    host = cJSON_GetObjectItem(root, "host");
+
+    if (bin == NULL || host == NULL) {
+        ESP_LOGE(TAG, "failed to get bin or host");
+        goto exit;
+    }
+
+    binURL = (char*)calloc(sizeof(char), 256);
+    if (binURL == NULL) {
+        ESP_LOGE(TAG, "malloc failed: binURL");
+        goto exit;
+    }
+
+    snprintf(binURL, 256, "https://%s%s", host->valuestring, bin->valuestring);
+    xTaskCreate(do_ota, "ota_task", 4096, &binURL, 5, NULL);
+
+exit:
+    esp_http_client_cleanup(http_client);
+    free(response);
+    vTaskDelay(pdMS_TO_TICKS(1000 * 60 * 60 * 6));
 }
 
 void ota_init() {
-    xTaskCreate(ota_timer_handler, "ota_timer", 1024, NULL, 5, NULL);
+    //esp timer
+    esp_timer_create_args_t ota_timer_args = {
+        .callback = &ota_timer_handler,
+        .name = "ota_timer",
+    };
+
+    esp_timer_handle_t ota_timer;
+    esp_timer_create(&ota_timer_args, &ota_timer);
+    esp_timer_start_periodic(ota_timer, 1000 * 60 * 60 * 6);
+    ESP_LOGI(TAG, "timer started");
 }

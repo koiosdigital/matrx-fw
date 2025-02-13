@@ -15,10 +15,10 @@
 #include <mbedtls/base64.h>
 
 static const char* TAG = "sockets";
-TaskHandle_t xSocketsTask = nullptr;
+TaskHandle_t xSocketsTask = NULL;
 
-QueueHandle_t xSocketsQueue = nullptr;
-esp_websocket_client_handle_t client = nullptr;
+QueueHandle_t xSocketsQueue = NULL;
+esp_websocket_client_handle_t client = NULL;
 
 typedef struct ProcessableMessage_t {
     char* message;
@@ -29,7 +29,7 @@ typedef struct ProcessableMessage_t {
 static void websocket_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id, void* event_data)
 {
     esp_websocket_event_data_t* data = (esp_websocket_event_data_t*)event_data;
-    static char* dbuf = nullptr;
+    static char* dbuf = NULL;
 
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
@@ -176,24 +176,18 @@ void sockets_task(void* pvParameter)
             }
 
             if (message.is_outbox) {
-                ESP_LOGI(TAG, "sending message with length %d", message.message_len);
                 esp_websocket_client_send_text(client, message.message, message.message_len, pdMS_TO_TICKS(1000));
                 free(message.message);
+                continue;
             }
-            else {
-                ESP_LOGI(TAG, "received message with length %d", message.message_len);
-                for (int i = 0; i < message.message_len; i++) {
-                    ESP_LOGI(TAG, "%c", message.message[i]);
-                }
 
-                Matrx__SocketMessage* socket_message = matrx__socket_message__unpack(NULL, message.message_len, (uint8_t*)message.message);
-                if (socket_message == NULL) {
-                    ESP_LOGE(TAG, "failed to unpack socket message");
-                    free(message.message);
-                    continue;
-                }
-                handle_message(socket_message);
+            Matrx__SocketMessage* socket_message = matrx__socket_message__unpack(NULL, message.message_len, (uint8_t*)message.message);
+            if (socket_message == NULL) {
+                ESP_LOGE(TAG, "failed to unpack socket message");
+                free(message.message);
+                continue;
             }
+            handle_message(socket_message);
         }
     }
 }
@@ -206,15 +200,39 @@ void sockets_init()
 
 void sockets_connect()
 {
-    if (client != nullptr) {
-        esp_websocket_client_start(client);
+    if (client == NULL) {
+        return;
     }
+
+    esp_websocket_client_start(client);
 }
 
 void sockets_disconnect()
 {
-    if (client != nullptr) {
-        esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
+    if (client != NULL) {
+        return;
+    }
+
+    esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
+}
+
+void send_socket_message(Matrx__SocketMessage* message)
+{
+    size_t len = matrx__socket_message__get_packed_size(message);
+    uint8_t* buffer = (uint8_t*)malloc(len);
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "failed to allocate message buffer");
+        return;
+    }
+
+    matrx__socket_message__pack(message, buffer);
+    ProcessableMessage_t p_message;
+    p_message.message = (char*)buffer;
+    p_message.message_len = len;
+    p_message.is_outbox = true;
+
+    if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGE(TAG, "failed to send message to queue");
     }
 }
 
@@ -227,21 +245,7 @@ void request_render(uint8_t* schedule_item_uuid) {
     message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_REQUEST_RENDER;
     message.request_render = &request;
 
-    size_t len = matrx__socket_message__get_packed_size(&message);
-    uint8_t* buffer = (uint8_t*)malloc(len);
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "failed to allocate message buffer");
-        return;
-    }
-
-    ProcessableMessage_t p_message;
-    p_message.message = (char*)buffer;
-    p_message.message_len = len;
-    p_message.is_outbox = true;
-
-    if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGE(TAG, "failed to send message to queue");
-    }
+    send_socket_message(&message);
 }
 
 void upload_coredump(uint8_t* core_dump, size_t core_dump_len) {
@@ -253,21 +257,7 @@ void upload_coredump(uint8_t* core_dump, size_t core_dump_len) {
     message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
     message.upload_core_dump = &upload;
 
-    size_t len = matrx__socket_message__get_packed_size(&message);
-    uint8_t* buffer = (uint8_t*)malloc(len);
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "failed to allocate message buffer");
-        return;
-    }
-
-    ProcessableMessage_t p_message;
-    p_message.message = (char*)buffer;
-    p_message.message_len = len;
-    p_message.is_outbox = true;
-
-    if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGE(TAG, "failed to send message to queue");
-    }
+    send_socket_message(&message);
 }
 
 void request_schedule() {
@@ -277,21 +267,7 @@ void request_schedule() {
     message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_REQUEST_SCHEDULE;
     message.request_schedule = &request;
 
-    size_t len = matrx__socket_message__get_packed_size(&message);
-    uint8_t* buffer = (uint8_t*)malloc(len);
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "failed to allocate message buffer");
-        return;
-    }
-
-    ProcessableMessage_t p_message;
-    p_message.message = (char*)buffer;
-    p_message.message_len = len;
-    p_message.is_outbox = true;
-
-    if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGE(TAG, "failed to send message to queue");
-    }
+    send_socket_message(&message);
 }
 
 void attempt_coredump_upload() {

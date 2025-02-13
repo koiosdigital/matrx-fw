@@ -27,7 +27,7 @@ char provisioning_device_name[32];
 char provisioning_qr_payload[64];
 char provisioning_pop_token[17];
 
-TaskHandle_t xProvisioningTask = nullptr;
+TaskHandle_t xProvisioningTask = NULL;
 
 typedef enum ProvisioningTaskNotification_t {
     STOP_PROVISIONING = 1,
@@ -129,15 +129,16 @@ void pki_prov_start_enroll() {
     };
 
     esp_err_t err;
-    cJSON* root = nullptr;
-    char* post_data = nullptr;
+    cJSON* root = NULL;
+    char* post_data, * response, * cert_buffer = NULL;
     esp_http_client_handle_t http_client = esp_http_client_init(&config);
 
-    char* csr_buffer = (char*)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
-    memset(csr_buffer, 0, 4096);
+    char* csr_buffer = (char*)heap_caps_calloc(4096, sizeof(char), MALLOC_CAP_SPIRAM);
 
     size_t csr_len = 0;
     crypto_get_csr(csr_buffer, &csr_len);
+
+    int status_code = 0;
 
     if (csr_len == 0) {
         ESP_LOGE(TAG, "CSR not found");
@@ -154,67 +155,77 @@ void pki_prov_start_enroll() {
     esp_http_client_set_header(http_client, "X-Device-Name", get_provisioning_device_name());
 
     root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "csr", csr_buffer);
+    if (root == NULL) {
+        ESP_LOGE(TAG, "cJSON_CreateObject failed");
+        goto exit;
+    }
+
+    if (cJSON_AddStringToObject(root, "csr", csr_buffer) == NULL) {
+        ESP_LOGE(TAG, "cJSON_AddStringToObject failed");
+        goto exit;
+    }
 
     post_data = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
-    esp_http_client_set_post_field(http_client, post_data, strlen(post_data));
+    if (post_data == NULL) {
+        ESP_LOGE(TAG, "cJSON_PrintUnformatted failed");
+        goto exit;
+    }
+
+    err = esp_http_client_set_post_field(http_client, post_data, strlen(post_data));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_http_client_set_post_field failed");
+        goto exit;
+    }
 
     err = esp_http_client_perform(http_client);
-    if (err == ESP_OK) {
-        int status_code = esp_http_client_get_status_code(http_client);
-        if (status_code == 200) {
-            char* response = (char*)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
-            memset(response, 0, 4096);
-
-            int response_len = esp_http_client_read(http_client, response, 4096);
-            if (response_len > 0) {
-                cJSON* root = cJSON_Parse(response);
-                cJSON* cert = cJSON_GetObjectItem(root, "cert");
-
-                if (cert != NULL) {
-                    char* cert_buffer = cert->valuestring;
-
-                    ESP_LOGI(TAG, "PKI enrollment OK: cert len %d", strlen(cert_buffer));
-                    crypto_set_device_cert(cert_buffer, strlen(cert_buffer));
-                    crypto_clear_csr();
-
-                    free(cert_buffer);
-                }
-
-                cJSON_Delete(root);
-            }
-
-            free(response);
-        }
-    }
-    else {
+    if (err != ESP_OK) {
         ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
         ESP_LOGE(TAG, "status code: %d", esp_http_client_get_status_code(http_client));
 
         goto exit;
     }
 
+    status_code = esp_http_client_get_status_code(http_client);
+    if (status_code == 200) {
+        response = (char*)heap_caps_calloc(4096, sizeof(char), MALLOC_CAP_SPIRAM);
+
+        int response_len = esp_http_client_read(http_client, response, 4096);
+        if (response_len > 0) {
+            cJSON* root = cJSON_Parse(response);
+            if (root == NULL) {
+                ESP_LOGE(TAG, "failed to parse JSON");
+                goto exit;
+            }
+
+            cJSON* cert = cJSON_GetObjectItem(root, "cert");
+            if (cert == NULL) {
+                ESP_LOGE(TAG, "failed to get cert");
+                goto exit;
+            }
+
+            cert_buffer = cert->valuestring;
+            crypto_set_device_cert(cert_buffer, strlen(cert_buffer));
+            crypto_clear_csr();
+
+            ESP_LOGI(TAG, "device enrolled in PKI");
+        }
+    }
+
 exit:
     esp_http_client_cleanup(http_client);
-    if (post_data != NULL) {
-        free(post_data);
-    }
-    if (csr_buffer != NULL) {
-        free(csr_buffer);
-    }
+    free(response);
+    free(post_data);
+    free(csr_buffer);
 }
 
 void prov_display_qr_helper(esp_qrcode_handle_t qrcode) {
-    uint8_t* display_buffer = (uint8_t*)heap_caps_malloc(get_display_buffer_size(), MALLOC_CAP_SPIRAM);
-
+    uint8_t* display_buffer = (uint8_t*)heap_caps_calloc(get_display_buffer_size(), sizeof(uint8_t*), MALLOC_CAP_SPIRAM);
     if (display_buffer == NULL) {
         ESP_LOGE(TAG, "malloc failed: display buffer");
         return;
     }
-
-    memset(display_buffer, 0, get_display_buffer_size());
 
     //We want to center the QR code on the display
     int qr_size = esp_qrcode_get_size(qrcode);

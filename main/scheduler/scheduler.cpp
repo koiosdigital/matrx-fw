@@ -10,7 +10,7 @@
 #include <string.h>
 
 ScheduleItem_t* schedule_head;
-uint8_t* fs_sprite_buf = nullptr;
+uint8_t* fs_sprite_buf = NULL;
 
 typedef enum ScheduleTaskNotification_t {
     SCHEDULE_TASK_NOTIFICATION_PAUSE,
@@ -48,6 +48,39 @@ void scheduler_task(void* pvParameter) {
     }
 }
 
+void scheduler_set_schedule(ScheduleItem_t* head) {
+    xSemaphoreTake(schedule_mutex, portMAX_DELAY);
+
+    ScheduleItem_t* current = head;
+    ScheduleItem_t* prev = NULL;
+
+    while (current != NULL) {
+        ScheduleItem_t* new_item = (ScheduleItem_t*)malloc(sizeof(ScheduleItem_t));
+
+        new_item->schedule_item_uuid = (char*)malloc(strlen(current->schedule_item_uuid) + 1);
+        strcpy(new_item->schedule_item_uuid, current->schedule_item_uuid);
+
+        new_item->schedule_position = current->schedule_position;
+        new_item->display_time = current->display_time;
+        new_item->pinned = current->pinned;
+        new_item->skipped = current->skipped;
+
+        new_item->next = NULL;
+
+        if (prev == NULL) {
+            schedule_head = new_item;
+        }
+        else {
+            prev->next = new_item;
+        }
+
+        prev = new_item;
+        current = current->next;
+    }
+
+    xSemaphoreGive(schedule_mutex);
+}
+
 //Runs every 60 seconds, used to clear out any sprites that are not in the schedule
 void scheduler_clear_unused_sprites() {
     xSemaphoreTake(schedule_mutex, portMAX_DELAY);
@@ -56,12 +89,12 @@ void scheduler_clear_unused_sprites() {
     RAMSprite_t* sprite_current = sprites_get_head();
     RAMSprite_t* sprite_head = sprite_current;
 
-    RAMSprite_t* sprite_prev = nullptr;
+    RAMSprite_t* sprite_prev = NULL;
 
-    while (sprite_current != nullptr) {
+    while (sprite_current != NULL) {
         bool found = false;
 
-        while (current != nullptr) {
+        while (current != NULL) {
             if (strcmp(current->schedule_item_uuid, sprite_current->uuid) == 0) {
                 found = true;
                 break;
@@ -72,7 +105,7 @@ void scheduler_clear_unused_sprites() {
 
         if (!found) {
             //delete the sprite
-            if (sprite_prev == nullptr) {
+            if (sprite_prev == NULL) {
                 sprite_head = sprite_current->next;
             }
             else {
@@ -96,7 +129,7 @@ void scheduler_clear_unused_sprites() {
 
 void scheduler_init() {
     //initialize the linked list
-    schedule_head = nullptr;
+    schedule_head = NULL;
 
     schedule_mutex = xSemaphoreCreateBinary();
 }
@@ -107,14 +140,14 @@ void scheduler_clear() {
     ScheduleItem_t* current = schedule_head;
     ScheduleItem_t* next;
 
-    while (current != nullptr) {
+    while (current != NULL) {
         next = current->next;
         free(current->schedule_item_uuid);
         free(current);
         current = next;
     }
 
-    schedule_head = nullptr;
+    schedule_head = NULL;
 
     xSemaphoreGive(schedule_mutex);
 }

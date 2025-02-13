@@ -39,15 +39,14 @@ void crypto_generate_key(void* pvParameter) {
     mbedtls_ctr_drbg_init(&ctrDrbg);
 
 
-    ESP_LOGD(TAG, "gen RSA key: %d bits", KEY_SIZE);
-    display_set_status_bar(0, 0, 255);
+    ESP_LOGI(TAG, "gen RSA key: %d bits", KEY_SIZE);
 
     esp_task_wdt_config_t twdt_config = {
-        .timeout_ms = 100000,
+        .timeout_ms = 1000 * 60 * 2, // 2 minutes
         .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, // Bitmask of all cores
         .trigger_panic = false,
     };
-    ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&twdt_config));
+    esp_task_wdt_reconfigure(&twdt_config);
 
     //seed the entropy source
     error = mbedtls_ctr_drbg_seed(&ctrDrbg, mbedtls_entropy_func, &entropy,
@@ -69,12 +68,11 @@ void crypto_generate_key(void* pvParameter) {
         goto exit;
     }
 
-    ESP_LOGD(TAG, "keygen complete");
+    ESP_LOGI(TAG, "keygen complete");
 
 exit:
-
     twdt_config.timeout_ms = 3000;
-    ESP_ERROR_CHECK(esp_task_wdt_reconfigure(&twdt_config));
+    esp_task_wdt_reconfigure(&twdt_config);
 
     mbedtls_ctr_drbg_free(&ctrDrbg);
     mbedtls_entropy_free(&entropy);
@@ -85,40 +83,60 @@ esp_err_t crypto_calculate_rinv_mprime(mbedtls_mpi* N, mbedtls_mpi* rinv, uint32
     esp_err_t error = ESP_OK;
 
     mbedtls_mpi rr, ls32, a;
+    uint32_t a32 = 0;
     mbedtls_mpi_init(&rr);
     mbedtls_mpi_init(&ls32);
     mbedtls_mpi_init(&a);
 
     ESP_LOGD(TAG, "calculating rinv, mprime");
 
-    // python equivalent code:
-    //
-    //    key_size = private_key.key_size # in bits
-    //
-    //    # calculate rinv == Rb
-    //    rr = 1 << (key_size * 2)
-    //    rinv = rr % pub_numbers.n # RSA r inverse operand
-    //
-    //    # calculate MPrime
-    //    a = rsa._modinv(pub_numbers.n, 1 << 32)
-    //    mprime = (a * -1) & 0xFFFFFFFF # RSA M prime operand
+    error = mbedtls_mpi_lset(&rr, 1);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "lset failed: rr");
+        goto exit;
+    }
 
-    mbedtls_mpi_lset(&rr, 1);
-    mbedtls_mpi_shift_l(&rr, KEY_SIZE * 2);
+    error = mbedtls_mpi_shift_l(&rr, KEY_SIZE * 2);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "shift_l failed: rr");
+        goto exit;
+    }
 
-    mbedtls_mpi_mod_mpi(rinv, &rr, N);
+    error = mbedtls_mpi_mod_mpi(rinv, &rr, N);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "mod_mpi failed: rinv");
+        goto exit;
+    }
 
-    mbedtls_mpi_lset(&ls32, 1);
-    mbedtls_mpi_shift_l(&ls32, 32);
-    mbedtls_mpi_inv_mod(&a, N, &ls32);
+    error = mbedtls_mpi_lset(&ls32, 1);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "lset failed: ls32");
+        goto exit;
+    }
+
+    error = mbedtls_mpi_shift_l(&ls32, 32);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "shift_l failed: ls32");
+        goto exit;
+    }
+
+    error = mbedtls_mpi_inv_mod(&a, N, &ls32);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "inv_mod failed: a");
+        goto exit;
+    }
 
     // a32 = a 
-    uint32_t a32 = 0;
-    mbedtls_mpi_write_binary_le(&a, (uint8_t*)&a32, sizeof(uint32_t));
+    error = mbedtls_mpi_write_binary_le(&a, (uint8_t*)&a32, sizeof(uint32_t));
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "write_binary_le failed: a");
+        goto exit;
+    }
 
     // mprime
     *mprime = ((int32_t)a32 * -1) & 0xFFFFFFFF;
 
+exit:
     mbedtls_mpi_free(&rr);
     mbedtls_mpi_free(&ls32);
     mbedtls_mpi_free(&a);
@@ -131,9 +149,21 @@ esp_err_t crypto_rinv_mprime_to_ds_params(mbedtls_mpi* D, mbedtls_mpi* N, mbedtl
 
     ESP_LOGD(TAG, "converting to DS params");
 
-    mbedtls_mpi_write_binary_le(D, (uint8_t*)params->Y, sizeof(params->Y));
-    mbedtls_mpi_write_binary_le(N, (uint8_t*)params->M, sizeof(params->M));
-    mbedtls_mpi_write_binary_le(rinv, (uint8_t*)params->Rb, sizeof(params->Rb));
+    error = mbedtls_mpi_write_binary_le(D, (uint8_t*)params->Y, sizeof(params->Y));
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "write_binary_le failed: Y");
+        return error;
+    }
+    error = mbedtls_mpi_write_binary_le(N, (uint8_t*)params->M, sizeof(params->M));
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "write_binary_le failed: M");
+        return error;
+    }
+    error = mbedtls_mpi_write_binary_le(rinv, (uint8_t*)params->Rb, sizeof(params->Rb));
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "write_binary_le failed: Rb");
+        return error;
+    }
 
     //reverse_bytes((uint8_t*)params->Y, sizeof(pd_4096_bit_t)); // big to little endian
     //reverse_bytes((uint8_t*)params->M, sizeof(pd_4096_bit_t)); // big to little endian
@@ -159,45 +189,84 @@ esp_err_t crypto_store_csr(mbedtls_rsa_context* rsa, nvs_handle_t handle) {
     mbedtls_x509write_csr req;
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
+    mbedtls_pk_context pk;
+    char cn[128];
+    unsigned char* csr_buffer = NULL;
+
     mbedtls_entropy_init(&entropy);
     mbedtls_ctr_drbg_init(&ctr_drbg);
 
     //seed the entropy source
     error = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, NULL, 0);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "ctr_drbg_seed failed");
+        goto exit;
+    }
 
     //generate CSR
     mbedtls_x509write_csr_init(&req);
     mbedtls_x509write_csr_set_md_alg(&req, MBEDTLS_MD_SHA256);
-    mbedtls_x509write_csr_set_key_usage(&req, MBEDTLS_X509_KU_DIGITAL_SIGNATURE);
-    mbedtls_x509write_csr_set_ns_cert_type(&req, MBEDTLS_X509_NS_CERT_TYPE_SSL_CLIENT);
 
-    char cn[128];
+    error = mbedtls_x509write_csr_set_key_usage(&req, MBEDTLS_X509_KU_DIGITAL_SIGNATURE);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "set_key_usage failed");
+        goto exit;
+    }
+
+    error = mbedtls_x509write_csr_set_ns_cert_type(&req, MBEDTLS_X509_NS_CERT_TYPE_SSL_CLIENT);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "set_ns_cert_type failed");
+        goto exit;
+    }
+
     snprintf(cn, sizeof(cn), "CN=%s.iotdevices.koiosdigital.net", get_provisioning_device_name());
 
-    mbedtls_x509write_csr_set_subject_name(&req, cn);
+    error = mbedtls_x509write_csr_set_subject_name(&req, cn);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "set_subject_name failed");
+        goto exit;
+    }
 
-    mbedtls_pk_context pk;
-    mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
-    mbedtls_rsa_copy(mbedtls_pk_rsa(pk), rsa);
+    error = mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "pk_setup failed");
+        goto exit;
+    }
+
+    error = mbedtls_rsa_copy(mbedtls_pk_rsa(pk), rsa);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "rsa_copy failed");
+        goto exit;
+    }
 
     mbedtls_x509write_csr_set_key(&req, &pk);
 
-    unsigned char* csr_buffer = (unsigned char*)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    csr_buffer = (unsigned char*)calloc(4096, sizeof(unsigned char));
     if (csr_buffer == NULL) {
         ESP_LOGE(TAG, "malloc failed: csr");
-        error = ESP_ERR_NO_MEM;
-        return error;
+        goto exit;
     }
-    memset(csr_buffer, 0, 4096);
 
     error = mbedtls_x509write_csr_pem(&req, csr_buffer, 4096, mbedtls_ctr_drbg_random, &ctr_drbg);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "csr_pem failed");
+        goto exit;
+    }
 
     error = nvs_set_blob(handle, NVS_CRYPTO_CSR, csr_buffer, 4096);
-    ESP_ERROR_CHECK(error);
-    error = nvs_commit(handle);
-    ESP_ERROR_CHECK(error);
-    nvs_close(handle);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_blob failed");
+        goto exit;
+    }
 
+    error = nvs_commit(handle);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_commit failed");
+        goto exit;
+    }
+
+exit:
+    nvs_close(handle);
     mbedtls_x509write_csr_free(&req);
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);
@@ -247,13 +316,12 @@ esp_err_t crypto_keygen_if_needed() {
     }
 
     // alloc
-    params = (esp_ds_p_data_t*)heap_caps_malloc(sizeof(esp_ds_p_data_t), MALLOC_CAP_SPIRAM);
+    params = (esp_ds_p_data_t*)calloc(sizeof(esp_ds_p_data_t), 1);
     if (params == NULL) {
-        ESP_LOGE(TAG, "malloc failed");
+        ESP_LOGE(TAG, "malloc failed: esp_ds_p_data_t");
         error = ESP_ERR_NO_MEM;
         goto exit;
     }
-    memset(params, 0, sizeof(esp_ds_p_data_t));
 
     // esp_ds params
     error = crypto_rinv_mprime_to_ds_params(&rsa.private_D, &rsa.private_N, &rinv, mprime, params);
@@ -269,13 +337,12 @@ esp_err_t crypto_keygen_if_needed() {
     esp_fill_random(hmac, 32);
 
     // allocate encrypted data
-    encrypted = (esp_ds_data_t*)heap_caps_malloc(sizeof(esp_ds_data_t), MALLOC_CAP_DMA);
+    encrypted = (esp_ds_data_t*)heap_caps_calloc(sizeof(esp_ds_data_t), 1, MALLOC_CAP_DMA);
     if (encrypted == NULL) {
-        ESP_LOGE(TAG, "malloc failed");
+        ESP_LOGE(TAG, "malloc failed: esp_ds_data_t");
         error = ESP_ERR_NO_MEM;
         goto exit;
     }
-    memset(encrypted, 0, sizeof(esp_ds_data_t));
 
     error = esp_ds_encrypt_params(encrypted, iv, params, hmac);
     if (error != ESP_OK) {
@@ -293,27 +360,40 @@ esp_err_t crypto_keygen_if_needed() {
 
     //write to nvs
     error = nvs_set_blob(handle, NVS_CRYPTO_CIPHERTEXT, encrypted->c, ESP_DS_C_LEN);
-    ESP_ERROR_CHECK(error);
-    error = nvs_set_blob(handle, NVS_CRYPTO_IV, iv, ESP_DS_IV_LEN);
-    ESP_ERROR_CHECK(error);
-    error = nvs_set_u8(handle, NVS_CRYPTO_DS_KEY_ID, DS_KEY_BLOCK);
-    ESP_ERROR_CHECK(error);
-    error = nvs_set_u16(handle, NVS_CRYPTO_RSA_LEN, KEY_SIZE);
-    ESP_ERROR_CHECK(error);
-    error = nvs_commit(handle);
-    ESP_ERROR_CHECK(error);
-    nvs_close(handle);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs set blob failed: ciphertext");
+        goto exit;
+    }
 
-    display_set_status_bar(0, 255, 255);
+    error = nvs_set_blob(handle, NVS_CRYPTO_IV, iv, ESP_DS_IV_LEN);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs set blob failed: iv");
+        goto exit;
+    }
+
+    error = nvs_set_u8(handle, NVS_CRYPTO_DS_KEY_ID, DS_KEY_BLOCK);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs set u8 failed: ds key id");
+        goto exit;
+    }
+
+    error = nvs_set_u16(handle, NVS_CRYPTO_RSA_LEN, KEY_SIZE);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs set u16 failed: rsa key length");
+        goto exit;
+    }
+
+    error = nvs_commit(handle);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs commit failed");
+        goto exit;
+    }
 
     error = crypto_store_csr(&rsa, handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "store csr failed");
         goto exit;
     }
-
-    //burn fuses
-    ESP_LOGI(TAG, "burning fuse block: %u", DS_KEY_BLOCK);
 
     error = esp_efuse_write_key(DS_KEY_BLOCK, ESP_EFUSE_KEY_PURPOSE_HMAC_DOWN_DIGITAL_SIGNATURE, hmac, 32);
     if (error != ESP_OK) {
@@ -328,13 +408,8 @@ esp_err_t crypto_keygen_if_needed() {
         goto exit;
     }
 
-    display_set_status_bar(0, 255, 0);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    display_clear_status_bar();
-
-    return error;
-
 exit:
+    nvs_close(handle);
     free(params);
     free(encrypted);
     mbedtls_mpi_free(&rinv);
@@ -349,13 +424,13 @@ esp_ds_data_ctx_t* crypto_get_ds_data_ctx(void)
     nvs_handle handle;
     uint32_t len = 0;
 
-    ds_data_ctx = (esp_ds_data_ctx_t*)heap_caps_malloc(sizeof(esp_ds_data_ctx_t), MALLOC_CAP_INTERNAL);
+    ds_data_ctx = (esp_ds_data_ctx_t*)calloc(sizeof(esp_ds_data_ctx_t), 1);
     if (ds_data_ctx == NULL) {
         ESP_LOGE(TAG, "malloc failed: ds_data_ctx");
         goto exit;
     }
 
-    ds_data_ctx->esp_ds_data = (esp_ds_data_t*)heap_caps_calloc(1, sizeof(esp_ds_data_t), MALLOC_CAP_INTERNAL);
+    ds_data_ctx->esp_ds_data = (esp_ds_data_t*)calloc(sizeof(esp_ds_data_t), 1);
     if (ds_data_ctx->esp_ds_data == NULL) {
         ESP_LOGE(TAG, "malloc failed: esp_ds_data");
         goto exit;
@@ -398,9 +473,7 @@ esp_ds_data_ctx_t* crypto_get_ds_data_ctx(void)
 
 exit:
     free(ds_data_ctx->esp_ds_data);
-    if (handle != 0) {
-        nvs_close(handle);
-    }
+    nvs_close(handle);
     free(ds_data_ctx);
     return NULL;
 }
@@ -412,15 +485,16 @@ esp_err_t crypto_get_csr(char* buffer, size_t* len) {
     error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
-        return error;
+        goto exit;
     }
 
     error = nvs_get_blob(handle, NVS_CRYPTO_CSR, buffer, len);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs get csr failed");
-        return error;
+        goto exit;
     }
 
+exit:
     nvs_close(handle);
     return error;
 }
