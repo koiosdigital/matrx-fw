@@ -4,25 +4,41 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "sprites.h"
+#include "matrx.pb-c.h"
+
+#define MAX_SCHEDULE_ITEMS 255
+#define PACKED_UUID_SIZE 4
+
+#define PREPARE_TIME 3000
+
+typedef struct ScheduleFlags_t {
+    unsigned pinned : 1;
+    unsigned skipped_user : 1;
+    unsigned skipped_server : 1;
+    unsigned display_time : 4;
+} ScheduleFlags_t;
+
 typedef struct ScheduleItem_t {
-    char* schedule_item_uuid; // 32 bytes, ties to sprite by uuid
-    uint32_t schedule_position; // 0-based, where it should be in list.
-    uint8_t display_time; // seconds
-    bool pinned;
-    bool skipped;
-    ScheduleItem_t* next;
+    uint32_t uuid[4] = { 0 };
+    ScheduleFlags_t flags = { 0 };
+    RAMSprite_t* sprite = NULL;
+    ScheduleItem_t* next = NULL;
 } ScheduleItem_t;
 
 void scheduler_init();
-void scheduler_pause();
-void scheduler_resume();
+bool scheduler_has_schedule();
+
+ScheduleItem_t* find_schedule_item(uint32_t* schedule_item_uuid);
+void scheduler_set_schedule(Matrx__ScheduleResponse* schedule_response);
+
+void scheduler_skip_schedule_item(uint32_t* schedule_item_uuid);
+void scheduler_skip_current_schedule_item();
+void scheduler_pin_schedule_item(uint32_t* schedule_item_uuid);
+void scheduler_pin_current_schedule_item();
 
 void scheduler_clear();
-void scheduler_set_schedule_item(char* schedule_item_uuid, uint32_t schedule_position, uint8_t display_time, bool pinned, bool skipped);
-void scheduler_skip_schedule_item(char* schedule_item_uuid);
-void scheduler_pin_schedule_item(char* schedule_item_uuid);
-void scheduler_set_schedule(ScheduleItem_t* head);
-
-bool scheduler_has_schedule();
+void scheduler_stop();
+void scheduler_start();
 
 #endif

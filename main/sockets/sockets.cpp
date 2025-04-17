@@ -4,6 +4,7 @@
 #include "esp_websocket_client.h"
 #include "esp_event.h"
 #include "esp_crt_bundle.h"
+#include "esp_http_client.h"
 
 #include "crypto.h"
 #include "display.h"
@@ -11,6 +12,7 @@
 #include "sprites.h"
 
 #include "matrx.pb-c.h"
+#include "cJSON.h"
 #include <esp_partition.h>
 #include <mbedtls/base64.h>
 
@@ -35,23 +37,21 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "connected");
         if (!scheduler_has_schedule()) {
-            show_fs_sprite("/fs/ready.webp");
+            //show_fs_sprite("/fs/ready.webp");
             request_schedule();
         }
         attempt_coredump_upload();
-        scheduler_resume();
+        //scheduler_resume();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "disconnected");
-        scheduler_pause();
-        show_fs_sprite("/fs/connect_cloud.webp");
+        //scheduler_pause();
+        //show_fs_sprite("/fs/connect_cloud.webp");
         break;
     case WEBSOCKET_EVENT_DATA:
-        ESP_LOGI(TAG, "WEBSOCKET_EVENT_DATA");
-
         if (data->payload_offset == 0) {
             free(dbuf);
-            dbuf = (char*)malloc(data->payload_len + 1);
+            dbuf = (char*)heap_caps_calloc(data->payload_len + 1, sizeof(char), MALLOC_CAP_SPIRAM);
             if (dbuf == NULL) {
                 ESP_LOGE(TAG, "malloc failed: dbuf (%d)", data->payload_len);
                 return;
@@ -63,8 +63,6 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
         }
 
         if (data->payload_len + data->payload_offset >= data->data_len) {
-            ESP_LOGD(TAG, "total payload length=%d, data_len=%d, current payload offset=%d\r\n", data->payload_len, data->data_len, data->payload_offset);
-
             ProcessableMessage_t message;
             message.message = dbuf;
             message.message_len = data->payload_len;
@@ -72,6 +70,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
 
             if (xQueueSend(xSocketsQueue, &message, pdMS_TO_TICKS(50)) != pdTRUE) {
                 ESP_LOGE(TAG, "failed to send message to queue");
+                free(dbuf);
             }
         }
 
@@ -83,13 +82,29 @@ void handle_schedule_response(Matrx__ScheduleResponse* response)
 {
     if (response->n_schedule_items == 0) {
         ESP_LOGI(TAG, "no schedule items");
+        scheduler_clear();
         return;
     }
+
+    scheduler_set_schedule(response);
 }
 
 void handle_render_response(Matrx__RenderResponse* response)
 {
     ESP_LOGI(TAG, "received render response");
+
+    if (response->render_error) {
+        ESP_LOGE(TAG, "^ it was a render error");
+        return;
+    }
+
+    ScheduleItem_t* item = find_schedule_item(response->uuid->packed_bytes);
+    if (item == NULL) {
+        ESP_LOGE(TAG, "failed to find schedule item");
+        return;
+    }
+
+    sprite_update_data(item->sprite, response->sprite_data.data, response->sprite_data.len);
 }
 
 void handle_pin_schedule_item(Matrx__PinScheduleItem* pin)
@@ -128,6 +143,8 @@ void handle_message(Matrx__SocketMessage* message)
     default:
         break;
     }
+
+    matrx__socket_message__free_unpacked(message, NULL);
 }
 
 void sockets_task(void* pvParameter)
@@ -145,7 +162,7 @@ void sockets_task(void* pvParameter)
         return;
     }
 
-    char* cert = (char*)heap_caps_malloc(2048, MALLOC_CAP_SPIRAM);
+    char* cert = (char*)heap_caps_calloc(2048, sizeof(char), MALLOC_CAP_SPIRAM);
     size_t cert_len;
 
     esp_err_t err = crypto_get_device_cert(cert, &cert_len);
@@ -219,7 +236,7 @@ void sockets_disconnect()
 void send_socket_message(Matrx__SocketMessage* message)
 {
     size_t len = matrx__socket_message__get_packed_size(message);
-    uint8_t* buffer = (uint8_t*)malloc(len);
+    uint8_t* buffer = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (buffer == NULL) {
         ESP_LOGE(TAG, "failed to allocate message buffer");
         return;
@@ -236,10 +253,14 @@ void send_socket_message(Matrx__SocketMessage* message)
     }
 }
 
-void request_render(uint8_t* schedule_item_uuid) {
+void request_render(uint32_t* schedule_item_uuid) {
     Matrx__RequestRender request = MATRX__REQUEST_RENDER__INIT;
-    request.schedule_item_uuid.data = schedule_item_uuid;
-    request.schedule_item_uuid.len = 16;
+
+    Matrx__ScheduleItemUUID uuid = MATRX__SCHEDULE_ITEM_UUID__INIT;
+    uuid.packed_bytes = schedule_item_uuid;
+    uuid.n_packed_bytes = 4;
+
+    request.uuid = &uuid;
 
     Matrx__SocketMessage message = MATRX__SOCKET_MESSAGE__INIT;
     message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_REQUEST_RENDER;
@@ -286,10 +307,10 @@ void attempt_coredump_upload() {
     size_t core_dump_size = core_dump_partition->size;
 
     size_t encoded_size = 0;
-    uint8_t* encoded_data;
+    uint8_t* encoded_data = 0;
     bool is_erased = true;
 
-    uint8_t* core_dump_data = (uint8_t*)heap_caps_malloc(core_dump_size + 1, MALLOC_CAP_SPIRAM); // used as return, so freed in calling function
+    uint8_t* core_dump_data = (uint8_t*)malloc(core_dump_size + 1); // used as return, so freed in calling function
     if (!core_dump_data)
     {
         ESP_LOGE(TAG, "Failed to allocate memory for core dump");
@@ -319,7 +340,7 @@ void attempt_coredump_upload() {
 
     // Calculate Base64 encoded size
     mbedtls_base64_encode(NULL, 0, &encoded_size, core_dump_data, core_dump_size);
-    encoded_data = (uint8_t*)heap_caps_malloc(encoded_size + 1, MALLOC_CAP_SPIRAM); // used as return, so freed in calling function
+    encoded_data = (uint8_t*)malloc(encoded_size + 1); // used as return, so freed in calling function
     if (!encoded_data)
     {
         ESP_LOGE(TAG, "Failed to allocate memory for encoded data");

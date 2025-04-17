@@ -7,13 +7,9 @@
 
 #include "webp/demux.h"
 
-#include "nvs_flash.h"
-
-MatrixPanel_I2S_DMA* dma_display = NULL;
 static const char* TAG = "display";
 
-uint16_t width = MATRIX_WIDTH;
-uint16_t height = MATRIX_HEIGHT;
+MatrixPanel_I2S_DMA* dma_display = nullptr;
 
 TaskHandle_t xDecoderTask = NULL;
 SemaphoreHandle_t xWebPSemaphore = NULL;
@@ -38,7 +34,7 @@ void decoder_task(void* pvParameter) {
     bool active = false;
 
     TickType_t anim_start_tick = 0;
-    TickType_t next_frame_tick = 0;
+    uint32_t frame_timestamp = 0;
     uint8_t* frame_buffer = NULL;
 
     while (1) {
@@ -62,6 +58,10 @@ void decoder_task(void* pvParameter) {
                 anim_start_tick = 0;
             }
 
+            if (anim_start_tick == 0) {
+                anim_start_tick = xTaskGetTickCount();
+            }
+
             int timestamp;
 
             if (!WebPAnimDecoderGetNext(dec, &frame_buffer, &timestamp)) {
@@ -70,36 +70,37 @@ void decoder_task(void* pvParameter) {
                 continue;
             }
 
-            if (anim_start_tick == 0) {
-                anim_start_tick = xTaskGetTickCount();
-            }
-
-            next_frame_tick = anim_start_tick + pdMS_TO_TICKS(timestamp);
             xSemaphoreGive(xWebPSemaphore);
-        }
 
-        //wait until next frame tick has elapsed
-        if (xTaskGetTickCount() < next_frame_tick) {
-            vTaskDelayUntil(&next_frame_tick, pdMS_TO_TICKS(1));
-        }
-
-        //display the frame
-        if (frame_buffer == NULL) {
-            ESP_LOGE(TAG, "frame buffer is null");
-            active = false;
-            continue;
-        }
-
-        int px = 0;
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                dma_display->drawPixelRGB888(x, y, frame_buffer[px * 4], frame_buffer[px * 4 + 1], frame_buffer[px * 4 + 2]);
-                px++;
+            //wait to display frame if necessary
+            if (anim_start_tick != 0) {
+                TickType_t current_tick = xTaskGetTickCount();
+                TickType_t should_display_at = anim_start_tick + pdMS_TO_TICKS(timestamp);
+                if (current_tick < should_display_at) {
+                    vTaskDelay(should_display_at - current_tick);
+                }
             }
-        }
 
-        if (current_status_bar.enabled) {
-            dma_display->drawFastHLine(0, 0, width, current_status_bar.r, current_status_bar.g, current_status_bar.b);
+            //display the frame
+            if (frame_buffer == NULL) {
+                ESP_LOGE(TAG, "frame buffer is null");
+                active = false;
+                continue;
+            }
+
+#if DISPLAY_ENABLED
+            int px = 0;
+            for (int y = 0; y < CONFIG_MATRIX_HEIGHT; y++) {
+                for (int x = 0; x < CONFIG_MATRIX_WIDTH; x++) {
+                    dma_display->drawPixelRGB888(x, y, frame_buffer[px * 4], frame_buffer[px * 4 + 1], frame_buffer[px * 4 + 2]);
+                    px++;
+                }
+            }
+
+            if (current_status_bar.enabled) {
+                dma_display->drawFastHLine(0, 0, CONFIG_MATRIX_WIDTH, current_status_bar.r, current_status_bar.g, current_status_bar.b);
+            }
+#endif
         }
     }
 }
@@ -122,57 +123,24 @@ void display_init() {
         .clk = CLK_PIN
     };
 
-    //open nvs
-    nvs_handle handle;
-    esp_err_t error = nvs_open(DISPLAY_CONFIG_NAMESPACE, NVS_READWRITE, &handle);
-    if (error != ESP_OK) {
-        ESP_LOGE(TAG, "nvs open failed");
-        return;
-    }
+    HUB75_I2S_CFG mxconfig(CONFIG_MATRIX_WIDTH, CONFIG_MATRIX_HEIGHT, 1, pins);
 
-    error = nvs_get_u16(handle, "width", &width);
-    if (error != ESP_OK) {
-        if (error == ESP_ERR_NVS_NOT_FOUND) {
-            ESP_LOGW(TAG, "nvs width not found, set default");
-            nvs_set_u16(handle, "width", width);
-        }
-        else {
-            ESP_LOGE(TAG, "nvs get width failed");
-            return;
-        }
-    }
-
-    error = nvs_get_u16(handle, "height", &height);
-    if (error != ESP_OK) {
-        if (error == ESP_ERR_NVS_NOT_FOUND) {
-            ESP_LOGW(TAG, "nvs height not found, set default");
-            nvs_set_u16(handle, "height", height);
-        }
-        else {
-            ESP_LOGE(TAG, "nvs get height failed");
-            return;
-        }
-    }
-
-    nvs_commit(handle);
-    nvs_close(handle);
-
-    HUB75_I2S_CFG mxconfig(width, height, 1, pins);
-
+#if DISPLAY_ENABLED
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
 
     dma_display->begin();
     dma_display->setBrightness(32);
-    dma_display->fillScreen(0);
+    dma_display->fillScreenRGB888(255, 255, 255);
 
     xWebPSemaphore = xSemaphoreCreateBinary();
-    xTaskCreatePinnedToCore(decoder_task, "decoder", 1024, NULL, 2, &xDecoderTask, 0);
+    xSemaphoreGive(xWebPSemaphore);
+#endif
+    xTaskCreatePinnedToCore(decoder_task, "decoder", 2048, NULL, 3, &xDecoderTask, 1);
 }
 
 void destroy_decoder() {
     if (dec != NULL) {
         if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGD(TAG, "destroy decoder");
             WebPAnimDecoderDelete(dec);
             dec = NULL;
         }
@@ -207,6 +175,7 @@ esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
 //Display a raw framebuffer on the screen. Stops the WebP decoder.
 //Buffer is expected to be in RGB format. Buffer is freed after display.
 void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
+#if DISPLAY_ENABLED
     destroy_decoder();
 
     webp_data.bytes = NULL;
@@ -214,17 +183,18 @@ void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
 
     dma_display->fillScreen(0);
 
-    if (raw_buf_len != width * height * 3) {
-        ESP_LOGE(TAG, "raw buffer size mismatch");
+    if (raw_buf_len != CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3) {
+        free(p_raw_buf);
         return;
     }
 
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int px = (y * width + x) * 3;
+    for (int y = 0; y < CONFIG_MATRIX_HEIGHT; y++) {
+        for (int x = 0; x < CONFIG_MATRIX_WIDTH; x++) {
+            int px = (y * CONFIG_MATRIX_HEIGHT + x) * 3;
             dma_display->drawPixelRGB888(x, y, p_raw_buf[px], p_raw_buf[px + 1], p_raw_buf[px + 2]);
         }
     }
+#endif
 
     free(p_raw_buf);
 }
@@ -241,10 +211,10 @@ void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 size_t get_display_buffer_size() {
-    return width * height * 3;
+    return CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3;
 }
 
 void get_display_dimensions(int* w, int* h) {
-    *w = width;
-    *h = height;
+    *w = CONFIG_MATRIX_WIDTH;
+    *h = CONFIG_MATRIX_HEIGHT;
 }

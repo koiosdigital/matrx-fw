@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 #include "nvs_flash.h"
+#include "esp_event.h"
 
 #include "crypto.h"
 #include "wifi.h"
@@ -13,6 +14,7 @@
 #include "display.h"
 #include "sockets.h"
 #include "sprites.h"
+#include "scheduler.h"
 #include "ota.h"
 
 static const char* TAG = "matrx";
@@ -21,35 +23,35 @@ static const char* TAG = "matrx";
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "Hello world!");
-
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_flash_erase();
         ret = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(ret);
 
-    //also initialize factory NVS partition
-    ret = nvs_flash_init_partition(NVS_CRYPTO_PARTITION);
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase_partition(NVS_CRYPTO_PARTITION));
-        ret = nvs_flash_init_partition(NVS_CRYPTO_PARTITION);
-    }
+    //event loop
+    esp_event_loop_create_default();
 
     sprites_init();
     display_init();
 
-    provisioning_init();
-    wifi_init();
-    sockets_init();
-
-    crypto_init();
-    ota_init();
-
     while (1) {
-        ESP_LOGI(TAG, "Hello world!");
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        //dump memory stats
+        ESP_LOGI(TAG, "Free heap: %" PRIu32, esp_get_free_heap_size());
+        ESP_LOGW(TAG, "low watermark: %d", uxTaskGetStackHighWaterMark(NULL));
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
+
+    provisioning_init();
+    crypto_init();
+
+    //scheduler_init();
+
+    wifi_init();
+    //sockets_init();
+
+    //ota_init();
+
+
 }

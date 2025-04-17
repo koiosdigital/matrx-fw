@@ -5,15 +5,11 @@
 
 #include "display.h"
 
-RAMSprite_t* sprites_head;
 uint8_t* fs_sprite_buf = NULL;
 
 static const char* TAG = "sprites";
 
 void sprites_init() {
-    //initialize the linked list
-    sprites_head = NULL;
-
     //register the littlefs partition
     esp_vfs_littlefs_conf_t conf = {
         .base_path = "/fs",
@@ -23,89 +19,40 @@ void sprites_init() {
     };
 
     ESP_ERROR_CHECK(esp_vfs_littlefs_register(&conf));
+
+    ESP_LOGI(TAG, "fs registered");
 }
 
-void sprites_update(uint32_t id, const char* uuid, uint8_t* data, size_t len) {
-    RAMSprite_t* current = sprites_head;
-    RAMSprite_t* prev = NULL;
+void sprite_free(RAMSprite_t* sprite) {
+    free(sprite->data);
+    free(sprite);
+}
 
-    while (current != NULL) {
-        if (strcmp(current->uuid, uuid) == 0) {
-            //update the sprite
-            free(current->data);
-            current->data = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
-
-            current->len = len;
-            memcpy(current->data, data, len);
-
-            return;
-        }
-
-        prev = current;
-        current = current->next;
+RAMSprite_t* sprite_allocate() {
+    RAMSprite_t* sprite = (RAMSprite_t*)malloc(sizeof(RAMSprite_t));
+    if (sprite == NULL) {
+        ESP_LOGE(TAG, "malloc failed: new sprite");
+        return NULL;
     }
 
-    //create a new sprite
-    RAMSprite_t* new_sprite = (RAMSprite_t*)malloc(sizeof(RAMSprite_t));
+    sprite->data = NULL;
+    sprite->len = 0;
 
-    new_sprite->uuid = (char*)malloc(strlen(uuid) + 1);
-    strcpy(new_sprite->uuid, uuid);
+    return sprite;
+}
 
-    new_sprite->data = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
-    new_sprite->len = len;
-    memcpy(new_sprite->data, data, len);
-
-    new_sprite->next = NULL;
-
-    if (prev == NULL) {
-        sprites_head = new_sprite;
+void sprite_update_data(RAMSprite_t* sprite, uint8_t* data, size_t len) {
+    free(sprite->data);
+    sprite->data = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
+    if (sprite->data == NULL) {
+        ESP_LOGE(TAG, "malloc failed: update sprite data");
         return;
     }
 
-    prev->next = new_sprite;
-}
+    memcpy(sprite->data, data, len);
+    sprite->len = len;
 
-RAMSprite_t* sprites_get(const char* uuid) {
-    //find the sprite with the given uuid
-    RAMSprite_t* current = sprites_head;
-    while (current != NULL) {
-        if (strcmp(current->uuid, uuid) == 0) {
-            return current;
-        }
-
-        current = current->next;
-    }
-
-    return NULL;
-}
-
-RAMSprite_t* sprites_get_head() {
-    return sprites_head;
-}
-
-void delete_sprite(const char* uuid) {
-    RAMSprite_t* current = sprites_head;
-    RAMSprite_t* prev = NULL;
-
-    while (current != NULL) {
-        if (strcmp(current->uuid, uuid) == 0) {
-            if (prev == NULL) {
-                sprites_head = current->next;
-            }
-            else {
-                prev->next = current->next;
-            }
-
-            free(current->uuid);
-            free(current->data);
-            free(current);
-
-            return;
-        }
-
-        prev = current;
-        current = current->next;
-    }
+    free(data);
 }
 
 void show_fs_sprite(const char* filename) {
@@ -125,9 +72,9 @@ void show_fs_sprite(const char* filename) {
     fs_sprite_buf = NULL;
 
     //read the file
-    fs_sprite_buf = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    fs_sprite_buf = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (fs_sprite_buf == NULL) {
-        ESP_LOGE(TAG, "malloc failed");
+        ESP_LOGE(TAG, "malloc failed: fs_sprite_buf");
         fclose(f);
         return;
     }
@@ -135,16 +82,12 @@ void show_fs_sprite(const char* filename) {
     fread(fs_sprite_buf, 1, len, f);
     fclose(f);
 
+    ESP_LOGI(TAG, "read %d bytes from %s", len, filename);
+
     display_sprite(fs_sprite_buf, len);
 }
 
-void show_ram_sprite(const char* uuid) {
-    RAMSprite_t* sprite = sprites_get(uuid);
-    if (sprite == NULL) {
-        ESP_LOGE(TAG, "sprite not found");
-        return;
-    }
-
+void show_sprite(RAMSprite_t* sprite) {
     display_sprite(sprite->data, sprite->len);
 
     free(fs_sprite_buf);

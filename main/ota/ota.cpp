@@ -50,13 +50,17 @@ void ota_timer_handler(void* pvParameter) {
     ESP_LOGI(TAG, "checking for updates");
 
     esp_http_client_handle_t http_client;
-    char* response = NULL;
-    char* binURL = NULL;
+
     int status_code = 0;
-    int response_len = 0;
     esp_err_t err = ESP_OK;
 
-    cJSON* root, * latest, * bin, * host = NULL;
+    cJSON* root = NULL;
+    cJSON* latest = NULL;
+    cJSON* bin = NULL;
+    cJSON* host = NULL;
+    char* response = NULL;
+    char* binURL = NULL;
+
     semver_t current_version, latest_version;
 
     semver_parse_version(esp_app_get_description()->version, &current_version);
@@ -80,7 +84,11 @@ void ota_timer_handler(void* pvParameter) {
         goto exit;
     }
 
-    response_len = esp_http_client_read(http_client, response, 512);
+    if (esp_http_client_read(http_client, response, 512) <= 0) {
+        ESP_LOGE(TAG, "failed to read response");
+        goto exit;
+    }
+
     root = cJSON_Parse(response);
     if (root == NULL) {
         ESP_LOGE(TAG, "failed to parse JSON");

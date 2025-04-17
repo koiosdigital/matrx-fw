@@ -1,11 +1,15 @@
 #ifndef PINOUT_H
 #define PINOUT_H
 
+#define DISPLAY_ENABLED false
+#define HAS_VEML6030 true
+#define HAS_THREE_BUTTONS true
+
 #define R1_PIN 48
 #define G1_PIN 35
 #define B1_PIN 34
 #define R2_PIN 47
-#define G2_PIN 33
+#define G2_PIN 28
 #define B2_PIN 21
 
 #define A_PIN  17
@@ -21,8 +25,6 @@
 #define I2C_SDA 4
 #define I2C_SCL 5
 
-#define BTN_A 9
-#define BTN_B 10
-#define BTN_C 11
+#define VEML_INT_PIN 6
 
 #endif

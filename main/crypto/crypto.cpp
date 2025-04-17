@@ -32,14 +32,13 @@ void crypto_generate_key(void* pvParameter) {
     mbedtls_rsa_context* rsa = (mbedtls_rsa_context*)pvParameter;
     xSemaphoreTake(keygen_mutex, portMAX_DELAY);
 
+    ESP_LOGI(TAG, "keygen started: %d bits", KEY_SIZE);
+
     esp_err_t error = ESP_OK;
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctrDrbg;
     mbedtls_entropy_init(&entropy);
     mbedtls_ctr_drbg_init(&ctrDrbg);
-
-
-    ESP_LOGI(TAG, "gen RSA key: %d bits", KEY_SIZE);
 
     esp_task_wdt_config_t twdt_config = {
         .timeout_ms = 1000 * 60 * 2, // 2 minutes
@@ -68,8 +67,6 @@ void crypto_generate_key(void* pvParameter) {
         goto exit;
     }
 
-    ESP_LOGI(TAG, "keygen complete");
-
 exit:
     twdt_config.timeout_ms = 3000;
     esp_task_wdt_reconfigure(&twdt_config);
@@ -77,6 +74,7 @@ exit:
     mbedtls_ctr_drbg_free(&ctrDrbg);
     mbedtls_entropy_free(&entropy);
     xSemaphoreGive(keygen_mutex);
+    vTaskDelete(NULL);
 }
 
 esp_err_t crypto_calculate_rinv_mprime(mbedtls_mpi* N, mbedtls_mpi* rinv, uint32_t* mprime) {
@@ -189,7 +187,7 @@ esp_err_t crypto_store_csr(mbedtls_rsa_context* rsa, nvs_handle_t handle) {
     mbedtls_x509write_csr req;
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
-    mbedtls_pk_context pk;
+    mbedtls_pk_context pk = { 0 };
     char cn[128];
     unsigned char* csr_buffer = NULL;
 
@@ -226,10 +224,13 @@ esp_err_t crypto_store_csr(mbedtls_rsa_context* rsa, nvs_handle_t handle) {
         ESP_LOGE(TAG, "set_subject_name failed");
         goto exit;
     }
+    else {
+        ESP_LOGI(TAG, "CSR subject name: %s", cn);
+    }
 
     error = mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
     if (error != ESP_OK) {
-        ESP_LOGE(TAG, "pk_setup failed");
+        ESP_LOGE(TAG, "pk_setup failed, error: %d", error);
         goto exit;
     }
 
@@ -253,7 +254,11 @@ esp_err_t crypto_store_csr(mbedtls_rsa_context* rsa, nvs_handle_t handle) {
         goto exit;
     }
 
-    error = nvs_set_blob(handle, NVS_CRYPTO_CSR, csr_buffer, 4096);
+    //dump csr
+    ESP_LOGI(TAG, "CSR: \n%s", csr_buffer);
+    ESP_LOGI(TAG, "CSR len: %d", strlen((char*)csr_buffer));
+
+    error = nvs_set_blob(handle, NVS_CRYPTO_CSR, csr_buffer, strlen((char*)csr_buffer));
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs_set_blob failed");
         goto exit;
@@ -278,6 +283,15 @@ exit:
 esp_err_t crypto_keygen_if_needed() {
     esp_err_t error = ESP_OK;
 
+    bool has_fuses = esp_efuse_get_key_purpose(DS_KEY_BLOCK) ==
+        ESP_EFUSE_KEY_PURPOSE_HMAC_DOWN_DIGITAL_SIGNATURE;
+
+    if (has_fuses) {
+        ESP_LOGI(TAG, "fuses already burned, skipping keygen");
+        crypto_state = CRYPTO_STATE_KEY_GENERATED;
+        return ESP_OK;
+    }
+
     // allocations
     esp_ds_p_data_t* params = NULL;
     esp_ds_data_t* encrypted = NULL;
@@ -289,23 +303,15 @@ esp_err_t crypto_keygen_if_needed() {
 
     uint32_t mprime = 0;
 
-    bool has_fuses = esp_efuse_get_key_purpose(DS_KEY_BLOCK) ==
-        ESP_EFUSE_KEY_PURPOSE_HMAC_DOWN_DIGITAL_SIGNATURE;
-
-    if (has_fuses) {
-        ESP_LOGD(TAG, "fuses already burned");
-        crypto_state = CRYPTO_STATE_KEY_GENERATED;
-        goto exit;
-    }
-
     keygen_mutex = xSemaphoreCreateBinary();
+    xSemaphoreGive(keygen_mutex);
 
-    // get RSA keypair
+    // get RSA keypair on APP_CPU
     xTaskCreatePinnedToCore(crypto_generate_key, "crypto_keygen", 4096, (void*)&rsa, 5, NULL, 1);
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     while (xSemaphoreTake(keygen_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGI(TAG, "waiting for keygen");
+        ESP_LOGD(TAG, "waiting for keygen to finish");
     }
 
     // rinv, mprime
@@ -352,7 +358,7 @@ esp_err_t crypto_keygen_if_needed() {
 
     //open nvs handle
     nvs_handle handle;
-    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
+    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;
@@ -392,12 +398,14 @@ esp_err_t crypto_keygen_if_needed() {
     error = crypto_store_csr(&rsa, handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "store csr failed");
+        esp_restart();
         goto exit;
     }
 
     error = esp_efuse_write_key(DS_KEY_BLOCK, ESP_EFUSE_KEY_PURPOSE_HMAC_DOWN_DIGITAL_SIGNATURE, hmac, 32);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "burn hmac failed");
+        esp_restart();
         goto exit;
     }
 
@@ -436,7 +444,7 @@ esp_ds_data_ctx_t* crypto_get_ds_data_ctx(void)
         goto exit;
     }
 
-    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
+    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;
@@ -482,15 +490,20 @@ esp_err_t crypto_get_csr(char* buffer, size_t* len) {
     esp_err_t error;
     nvs_handle handle;
 
-    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
+    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;
     }
 
+    if (buffer == NULL) {
+        error = nvs_find_key(handle, NVS_CRYPTO_CSR, NULL);
+        goto exit;
+    }
+
     error = nvs_get_blob(handle, NVS_CRYPTO_CSR, buffer, len);
     if (error != ESP_OK) {
-        ESP_LOGE(TAG, "nvs get csr failed");
+        ESP_LOGE(TAG, "nvs get csr failed, error: %d", error);
         goto exit;
     }
 
@@ -503,7 +516,7 @@ esp_err_t crypto_clear_csr() {
     esp_err_t error;
     nvs_handle handle;
 
-    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
+    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;
@@ -530,9 +543,14 @@ esp_err_t crypto_get_device_cert(char* buffer, size_t* len) {
     esp_err_t error;
     nvs_handle handle;
 
-    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READONLY, &handle);
+    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
+        goto exit;
+    }
+
+    if (buffer == NULL) {
+        error = nvs_find_key(handle, NVS_CRYPTO_DEVICE_CERT, NULL);
         goto exit;
     }
 
@@ -551,7 +569,7 @@ esp_err_t crypto_set_device_cert(char* buffer, size_t len) {
     esp_err_t error;
     nvs_handle handle;
 
-    error = nvs_open_from_partition(NVS_CRYPTO_PARTITION, NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
+    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "nvs open failed");
         goto exit;
@@ -584,10 +602,12 @@ esp_err_t crypto_init(void) {
 
     if (crypto_state == CRYPTO_STATE_KEY_GENERATED) {
         if (crypto_get_csr(NULL, NULL) == ESP_OK) {
+            ESP_LOGI(TAG, "CSR found");
             crypto_state = CRYPTO_STATE_VALID_CSR;
         }
 
         if (crypto_get_device_cert(NULL, NULL) == ESP_OK) {
+            ESP_LOGI(TAG, "device cert found");
             crypto_state = CRYPTO_STATE_VALID_CERT;
         }
     }

@@ -9,6 +9,7 @@
 #define PKI_PROVISIONING_ENDPOINT "https://device-api.koiosdigital.net/pki/v1/provision"
 
 void provisioning_init();
+void provisioning_task_init();
 void start_provisioning();
 void stop_provisioning();
 void reset_provisioning();
