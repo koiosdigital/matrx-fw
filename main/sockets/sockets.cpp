@@ -75,16 +75,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
         }
 
         break;
-    case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGE(TAG, "error");
-        break;
-    case WEBSOCKET_EVENT_CLOSED:
-        ESP_LOGI(TAG, "closed");
-        free(dbuf);
-        dbuf = NULL;
-        break;
     default:
-        ESP_LOGI(TAG, "event %" PRIi32, event_id);
         break;
     }
 }
@@ -109,7 +100,7 @@ void handle_render_response(Matrx__RenderResponse* response)
         return;
     }
 
-    ScheduleItem_t* item = find_schedule_item(response->uuid->packed_bytes);
+    ScheduleItem_t* item = find_schedule_item(response->uuid.data);
     if (item == NULL) {
         ESP_LOGE(TAG, "failed to find schedule item");
         return;
@@ -187,7 +178,7 @@ void sockets_task(void* pvParameter)
         .uri = SOCKETS_URI,
         .port = 443,
         .client_cert = cert,
-        .client_cert_len = cert_len + 1,
+        .client_cert_len = cert_len,
         .client_ds_data = ds_data_ctx,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
@@ -199,14 +190,13 @@ void sockets_task(void* pvParameter)
 
     while (1)
     {
-        ESP_LOGI(TAG, "waiting for message, watermark: %d", uxTaskGetStackHighWaterMark(NULL));
         if (xQueueReceive(xSocketsQueue, &message, pdMS_TO_TICKS(5000)) == pdTRUE) {
             if (message.message == NULL) {
                 continue;
             }
 
             if (message.is_outbox) {
-                esp_websocket_client_send_text(client, message.message, message.message_len, pdMS_TO_TICKS(1000));
+                esp_websocket_client_send_bin(client, message.message, message.message_len, pdMS_TO_TICKS(1000));
                 free(message.message);
                 continue;
             }
@@ -225,7 +215,7 @@ void sockets_task(void* pvParameter)
 void sockets_init()
 {
     xSocketsQueue = xQueueCreate(10, sizeof(ProcessableMessage_t));
-    xTaskCreatePinnedToCore(sockets_task, "sockets", 40000, NULL, 5, &xSocketsTask, 1);
+    xTaskCreatePinnedToCore(sockets_task, "sockets", 8192, NULL, 5, &xSocketsTask, 1);
 }
 
 void sockets_connect()
@@ -266,14 +256,10 @@ void send_socket_message(Matrx__SocketMessage* message)
     }
 }
 
-void request_render(uint32_t* schedule_item_uuid) {
+void request_render(uint8_t* schedule_item_uuid) {
     Matrx__RequestRender request = MATRX__REQUEST_RENDER__INIT;
-
-    Matrx__ScheduleItemUUID uuid = MATRX__SCHEDULE_ITEM_UUID__INIT;
-    uuid.packed_bytes = schedule_item_uuid;
-    uuid.n_packed_bytes = 4;
-
-    request.uuid = &uuid;
+    request.uuid.data = schedule_item_uuid;
+    request.uuid.len = UUID_SIZE_BYTES;
 
     Matrx__SocketMessage message = MATRX__SOCKET_MESSAGE__INIT;
     message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_REQUEST_RENDER;

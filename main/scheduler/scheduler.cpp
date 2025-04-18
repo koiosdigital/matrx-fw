@@ -31,10 +31,10 @@ static const char* TAG = "scheduler";
 
 SemaphoreHandle_t schedule_mutex = NULL;
 
-ScheduleItem_t* find_schedule_item(uint32_t* schedule_item_uuid) {
+ScheduleItem_t* find_schedule_item(uint8_t* schedule_item_uuid) {
     for (int i = 0; i < MAX_SCHEDULE_ITEMS; i++) {
         ScheduleItem_t* schedule_item = &schedule_items[i];
-        if (memcmp(schedule_item->uuid, schedule_item_uuid, PACKED_UUID_SIZE) == 0) {
+        if (memcmp(schedule_item->uuid, schedule_item_uuid, UUID_SIZE_BYTES == 0)) {
             return schedule_item;
         }
     }
@@ -55,15 +55,15 @@ void scheduler_set_schedule(Matrx__ScheduleResponse* schedule_response) {
     for (int i = 0; i < n_schedule_items; i++) {
         Matrx__ScheduleItem* item = schedule_response->schedule_items[i];
 
-        if (item->uuid->n_packed_bytes != PACKED_UUID_SIZE) {
+        if (item->uuid.len != UUID_SIZE_BYTES) {
             ESP_LOGE(TAG, "invalid UUID size");
             continue;
         }
 
-        ScheduleItem_t* matched_item = find_schedule_item(item->uuid->packed_bytes);
+        ScheduleItem_t* matched_item = find_schedule_item(item->uuid.data);
 
         ScheduleItem_t* schedule_item = &schedule_items[i];
-        memcpy(schedule_item->uuid, item->uuid->packed_bytes, PACKED_UUID_SIZE);
+        memcpy(schedule_item->uuid, item->uuid.data, UUID_SIZE_BYTES);
 
         schedule_item->flags.pinned = item->pinned;
         schedule_item->flags.skipped_server = item->skipped_by_server;
@@ -108,7 +108,7 @@ void scheduler_clear() {
     xSemaphoreGive(schedule_mutex);
 }
 
-void scheduler_skip_schedule_item(uint32_t* schedule_item_uuid) {
+void scheduler_skip_schedule_item(uint8_t* schedule_item_uuid) {
     xSemaphoreTake(schedule_mutex, portMAX_DELAY);
 
     ScheduleItem_t* schedule_item = find_schedule_item(schedule_item_uuid);
@@ -120,7 +120,7 @@ void scheduler_skip_schedule_item(uint32_t* schedule_item_uuid) {
     xSemaphoreGive(schedule_mutex);
 }
 
-void scheduler_pin_schedule_item(uint32_t* schedule_item_uuid) {
+void scheduler_pin_schedule_item(uint8_t* schedule_item_uuid) {
     xSemaphoreTake(schedule_mutex, portMAX_DELAY);
 
     ScheduleItem_t* schedule_item = find_schedule_item(schedule_item_uuid);
@@ -252,7 +252,6 @@ void scheduler_task(void* pvParameter) {
     ScheduleItem_t* next_item = NULL;
     esp_timer_handle_t prepare_timer = NULL;
     esp_timer_handle_t display_timer = NULL;
-    bool started = false;
 
     //setup timers
     esp_timer_create_args_t prepare_timer_args = {

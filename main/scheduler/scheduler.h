@@ -8,7 +8,7 @@
 #include "matrx.pb-c.h"
 
 #define MAX_SCHEDULE_ITEMS 255
-#define PACKED_UUID_SIZE 4
+#define UUID_SIZE_BYTES 16
 
 #define PREPARE_TIME 3000
 
@@ -20,7 +20,7 @@ typedef struct ScheduleFlags_t {
 } ScheduleFlags_t;
 
 typedef struct ScheduleItem_t {
-    uint32_t uuid[4] = { 0 };
+    uint8_t uuid[16] = { 0 };
     ScheduleFlags_t flags = { 0 };
     RAMSprite_t* sprite = NULL;
     ScheduleItem_t* next = NULL;
@@ -29,12 +29,12 @@ typedef struct ScheduleItem_t {
 void scheduler_init();
 bool scheduler_has_schedule();
 
-ScheduleItem_t* find_schedule_item(uint32_t* schedule_item_uuid);
+ScheduleItem_t* find_schedule_item(uint8_t* schedule_item_uuid);
 void scheduler_set_schedule(Matrx__ScheduleResponse* schedule_response);
 
-void scheduler_skip_schedule_item(uint32_t* schedule_item_uuid);
+void scheduler_skip_schedule_item(uint8_t* schedule_item_uuid);
 void scheduler_skip_current_schedule_item();
-void scheduler_pin_schedule_item(uint32_t* schedule_item_uuid);
+void scheduler_pin_schedule_item(uint8_t* schedule_item_uuid);
 void scheduler_pin_current_schedule_item();
 
 void scheduler_clear();
