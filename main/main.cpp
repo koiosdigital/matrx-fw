@@ -37,7 +37,7 @@ extern "C" void app_main(void)
 
     crypto_init();
 
-    //scheduler_init();
+    scheduler_init();
     sockets_init();
     //ota_init();
 
