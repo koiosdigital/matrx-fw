@@ -36,6 +36,11 @@ extern "C" void app_main(void)
     sprites_init();
     display_init();
 
+    provisioning_init();
+    wifi_init();
+
+    crypto_init();
+
     while (1) {
         //dump memory stats
         ESP_LOGI(TAG, "Free heap: %" PRIu32, esp_get_free_heap_size());
@@ -43,14 +48,9 @@ extern "C" void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
 
-    provisioning_init();
-    crypto_init();
 
     //scheduler_init();
-
-    wifi_init();
     //sockets_init();
-
     //ota_init();
 
 

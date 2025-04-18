@@ -224,9 +224,6 @@ esp_err_t crypto_store_csr(mbedtls_rsa_context* rsa, nvs_handle_t handle) {
         ESP_LOGE(TAG, "set_subject_name failed");
         goto exit;
     }
-    else {
-        ESP_LOGI(TAG, "CSR subject name: %s", cn);
-    }
 
     error = mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
     if (error != ESP_OK) {
@@ -253,10 +250,6 @@ esp_err_t crypto_store_csr(mbedtls_rsa_context* rsa, nvs_handle_t handle) {
         ESP_LOGE(TAG, "csr_pem failed");
         goto exit;
     }
-
-    //dump csr
-    ESP_LOGI(TAG, "CSR: \n%s", csr_buffer);
-    ESP_LOGI(TAG, "CSR len: %d", strlen((char*)csr_buffer));
 
     error = nvs_set_blob(handle, NVS_CRYPTO_CSR, csr_buffer, strlen((char*)csr_buffer));
     if (error != ESP_OK) {
@@ -498,6 +491,25 @@ esp_err_t crypto_get_csr(char* buffer, size_t* len) {
 
     if (buffer == NULL) {
         error = nvs_find_key(handle, NVS_CRYPTO_CSR, NULL);
+
+        //dump csr
+        char* csr = (char*)malloc(4096);
+        if (csr == NULL) {
+            ESP_LOGE(TAG, "malloc failed: csr");
+            error = ESP_ERR_NO_MEM;
+            goto exit;
+        }
+        size_t len = 4096;
+        error = nvs_get_blob(handle, NVS_CRYPTO_CSR, csr, &len);
+        if (error != ESP_OK) {
+            ESP_LOGE(TAG, "nvs get csr failed, error: %d", error);
+            free(csr);
+            goto exit;
+        }
+        ESP_LOGI(TAG, "CSR: \n%s", csr);
+        ESP_LOGI(TAG, "CSR len: %d", strlen(csr));
+        free(csr);
+
         goto exit;
     }
 
@@ -587,6 +599,57 @@ esp_err_t crypto_set_device_cert(char* buffer, size_t len) {
         goto exit;
     }
 
+exit:
+    nvs_close(handle);
+    return error;
+}
+
+esp_err_t crypto_get_claim_jwt(char* buffer, size_t* len) {
+    esp_err_t error;
+    nvs_handle handle;
+
+    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs open failed");
+        goto exit;
+    }
+
+    if (buffer == NULL) {
+        error = nvs_find_key(handle, NVS_CRYPTO_CLAIM_JWT, NULL);
+        goto exit;
+    }
+
+    error = nvs_get_blob(handle, NVS_CRYPTO_CLAIM_JWT, buffer, len);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs get claim jwt failed");
+        goto exit;
+    }
+exit:
+    nvs_close(handle);
+    return error;
+}
+
+esp_err_t crypto_set_claim_jwt(char* buffer, size_t len) {
+    esp_err_t error;
+    nvs_handle handle;
+
+    error = nvs_open(NVS_CRYPTO_NAMESPACE, NVS_READWRITE, &handle);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs open failed");
+        goto exit;
+    }
+
+    error = nvs_set_blob(handle, NVS_CRYPTO_CLAIM_JWT, buffer, len);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs set claim jwt failed");
+        goto exit;
+    }
+
+    error = nvs_commit(handle);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "nvs commit failed");
+        goto exit;
+    }
 exit:
     nvs_close(handle);
     return error;

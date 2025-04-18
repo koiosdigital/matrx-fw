@@ -35,11 +35,11 @@ menu "MATRX hardware configuration"
 
     choice MATRIX_SIZE
         prompt "LED matrix size"
-        default MATRIX_SIZE_32x16
+        default MATRIX_SIZE_64x32
         help
             Select the size of the LED matrix
-        config MATRIX_SIZE_32x16
-            bool "32x16"
+        config MATRIX_SIZE_64x32
+            bool "64x32"
         config MATRIX_SIZE_128x64
             bool "128x64"
         config MATRIX_SIZE_64x64
@@ -48,25 +48,24 @@ menu "MATRX hardware configuration"
 
     config MATRIX_WIDTH
         int
-        default 32 if MATRIX_SIZE_32x16
+        default 64 if MATRIX_SIZE_64x32
         default 128 if MATRIX_SIZE_128x64
         default 64 if MATRIX_SIZE_64x64
         help
             The width of the LED matrix in pixels.
-            32 = 32 pixels wide
-            128 = 128 pixels wide
             64 = 64 pixels wide
-        depends on MATRIX_SIZE_32x16 || MATRIX_SIZE_128x64 || MATRIX_SIZE_64x64
+            128 = 128 pixels wide
+        depends on MATRIX_SIZE_64x32 || MATRIX_SIZE_128x64 || MATRIX_SIZE_64x64
 
     config MATRIX_HEIGHT
         int
-        default 16 if MATRIX_SIZE_32x16
+        default 32 if MATRIX_SIZE_64x32
         default 64 if MATRIX_SIZE_128x64
         default 64 if MATRIX_SIZE_64x64
         help
             The height of the LED matrix in pixels.
-            16 = 16 pixels high
+            32 = 32 pixels high
             64 = 64 pixels high
-        depends on MATRIX_SIZE_32x16 || MATRIX_SIZE_128x64 || MATRIX_SIZE_64x64
+        depends on MATRIX_SIZE_64x32 || MATRIX_SIZE_128x64 || MATRIX_SIZE_64x64
 
 endmenu
