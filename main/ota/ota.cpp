@@ -78,7 +78,7 @@ void ota_timer_handler(void* pvParameter) {
         goto exit;
     }
 
-    response = (char*)calloc(sizeof(char), 512);
+    response = (char*)calloc(512, sizeof(char));
     if (response == NULL) {
         ESP_LOGE(TAG, "malloc failed: response");
         goto exit;
@@ -120,13 +120,13 @@ void ota_timer_handler(void* pvParameter) {
         goto exit;
     }
 
-    binURL = (char*)calloc(sizeof(char), 256);
+    binURL = (char*)calloc(512, sizeof(char));
     if (binURL == NULL) {
         ESP_LOGE(TAG, "malloc failed: binURL");
         goto exit;
     }
 
-    snprintf(binURL, 256, "https://%s%s", host->valuestring, bin->valuestring);
+    snprintf(binURL, 512, "https://%s%s", host->valuestring, bin->valuestring);
     xTaskCreate(do_ota, "ota_task", 4096, &binURL, 5, NULL);
 
 exit:

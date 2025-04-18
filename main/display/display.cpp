@@ -131,11 +131,12 @@ void display_init() {
     dma_display->begin();
     dma_display->setBrightness(32);
     dma_display->fillScreenRGB888(255, 255, 255);
+#endif
 
     xWebPSemaphore = xSemaphoreCreateBinary();
     xSemaphoreGive(xWebPSemaphore);
-#endif
-    xTaskCreatePinnedToCore(decoder_task, "decoder", 2048, NULL, 3, &xDecoderTask, 1);
+
+    xTaskCreatePinnedToCore(decoder_task, "decoder", 4096, NULL, 3, &xDecoderTask, 1);
 }
 
 void destroy_decoder() {

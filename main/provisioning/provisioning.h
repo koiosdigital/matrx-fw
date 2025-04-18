@@ -6,8 +6,6 @@
 
 #define DEVICE_NAME_PREFIX "MATRX"
 
-#define PKI_PROVISIONING_ENDPOINT "https://pki-api.koiosdigital.net/sign"
-
 void provisioning_init();
 void start_provisioning();
 void stop_provisioning();

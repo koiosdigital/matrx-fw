@@ -2,6 +2,8 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <stdio.h>
+#include <string.h>
 
 #include <esp_event.h>
 #include <esp_log.h>
@@ -10,18 +12,14 @@
 #include "esp_crt_bundle.h"
 #include <esp_random.h>
 #include <esp_mac.h>
+
+#include <qrcode.h>
 #include <wifi_provisioning/manager.h>
 #include <wifi_provisioning/scheme_ble.h>
 
-#include <stdio.h>
-#include <string.h>
-
-#include "cJSON.h"
-#include "qrcode.h"
-
+#include "certmgr.h"
 #include "crypto.h"
 #include "display.h"
-#include "matrx.pb-c.h"
 
 static const char* TAG = "provisioning";
 
@@ -132,137 +130,6 @@ void prov_display_qr() {
     }
 }
 
-esp_err_t custom_prov_config_data_handler(uint32_t session_id, const uint8_t* inbuf, ssize_t inlen, uint8_t** outbuf, ssize_t* outlen, void* priv_data) {
-    if (inbuf) {
-        ESP_LOGI(TAG, "Received data: %.*s", inlen, (char*)inbuf);
-        Matrx__CertMgrMessage* cert_mgr_message = matrx__cert_mgr_message__unpack(NULL, inlen, (uint8_t*)inbuf);
-        if (cert_mgr_message == NULL) {
-            ESP_LOGE(TAG, "failed to unpack cert mgr message");
-            matrx__cert_mgr_message__free_unpacked(cert_mgr_message, NULL);
-            return ESP_FAIL;
-        }
-
-        Matrx__CertMgrMessage* response = nullptr;
-
-        if (cert_mgr_message->message_case == Matrx__CertMgrMessage__MessageCase::MATRX__CERT_MGR_MESSAGE__MESSAGE_PROVISIONING_STATUS_REQUEST) {
-            ESP_LOGI(TAG, "Received provisioning status request");
-
-            bool has_csr = crypto_get_csr(NULL, NULL) == ESP_OK;
-            bool has_cert = crypto_get_device_cert(NULL, NULL) == ESP_OK;
-
-            ESP_LOGI(TAG, "has_csr: %d, has_cert: %d", has_csr, has_cert);
-
-            // Send provisioning status response
-            Matrx__ProvisioningStatusResponse* status_response = nullptr;
-            matrx__provisioning_status_response__init(status_response);
-
-            status_response->has_cert = has_cert;
-            status_response->has_csr = has_csr;
-
-            matrx__cert_mgr_message__init(response);
-            response->message_case = Matrx__CertMgrMessage__MessageCase::MATRX__CERT_MGR_MESSAGE__MESSAGE_PROVISIONING_STATUS_RESPONSE;
-            response->provisioning_status_response = status_response;
-
-            //pack
-            size_t response_len = matrx__cert_mgr_message__get_packed_size(response);
-            *outlen = response_len;
-            *outbuf = (uint8_t*)malloc(response_len);
-            if (*outbuf == NULL) {
-                ESP_LOGE(TAG, "System out of memory");
-                return ESP_ERR_NO_MEM;
-            }
-            matrx__cert_mgr_message__pack(response, *outbuf);
-
-            //free intermediate data
-            matrx__provisioning_status_request__free_unpacked(cert_mgr_message->provisioning_status_request, NULL);
-            matrx__cert_mgr_message__free_unpacked(cert_mgr_message, NULL);
-            matrx__provisioning_status_response__free_unpacked(status_response, NULL);
-            matrx__cert_mgr_message__free_unpacked(response, NULL);
-        }
-        else if (cert_mgr_message->message_case == Matrx__CertMgrMessage__MessageCase::MATRX__CERT_MGR_MESSAGE__MESSAGE_CSR_REQUEST) {
-            ESP_LOGI(TAG, "Received CSR request");
-
-            // Send provisioning status response
-            Matrx__CSRResponse* csr_response = nullptr;
-            matrx__csrresponse__init(csr_response);
-
-            char* csr = (char*)heap_caps_calloc(4096, sizeof(char), MALLOC_CAP_SPIRAM);
-            size_t len = 4096;
-
-            crypto_get_csr(csr, &len);
-
-            csr_response->csr_size = len;
-            csr_response->csr.data = (uint8_t*)malloc(len);
-            if (csr_response->csr.data == NULL) {
-                ESP_LOGE(TAG, "System out of memory");
-                return ESP_ERR_NO_MEM;
-            }
-            memcpy(csr_response->csr.data, csr, len);
-            csr_response->csr.len = len;
-            free(csr);
-
-            matrx__cert_mgr_message__init(response);
-            response->message_case = Matrx__CertMgrMessage__MessageCase::MATRX__CERT_MGR_MESSAGE__MESSAGE_CSR_RESPONSE;
-            response->csr_response = csr_response;
-
-            //pack
-            size_t response_len = matrx__cert_mgr_message__get_packed_size(response);
-            *outlen = response_len;
-            *outbuf = (uint8_t*)malloc(response_len);
-            if (*outbuf == NULL) {
-                ESP_LOGE(TAG, "System out of memory");
-                return ESP_ERR_NO_MEM;
-            }
-            matrx__cert_mgr_message__pack(response, *outbuf);
-
-            //free intermediate data
-            matrx__csrrequest__free_unpacked(cert_mgr_message->csr_request, NULL);
-            matrx__cert_mgr_message__free_unpacked(cert_mgr_message, NULL);
-            matrx__csrresponse__free_unpacked(csr_response, NULL);
-            matrx__cert_mgr_message__free_unpacked(response, NULL);
-        }
-        else if (cert_mgr_message->message_case == Matrx__CertMgrMessage__MessageCase::MATRX__CERT_MGR_MESSAGE__MESSAGE_SET_CERT_REQUEST) {
-            ESP_LOGI(TAG, "Received set cert request");
-
-            // Send provisioning status response
-            Matrx__SetCertResponse* set_cert_response = nullptr;
-            matrx__set_cert_response__init(set_cert_response);
-            set_cert_response->success = true;
-
-            esp_err_t ok = crypto_set_device_cert((char*)(cert_mgr_message->set_cert_request->cert.data), cert_mgr_message->set_cert_request->cert.len);
-            if (ok != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to set device cert");
-                set_cert_response->success = false;
-            }
-
-            matrx__cert_mgr_message__init(response);
-            response->message_case = Matrx__CertMgrMessage__MessageCase::MATRX__CERT_MGR_MESSAGE__MESSAGE_SET_CERT_RESPONSE;
-            response->set_cert_response = set_cert_response;
-
-            //pack
-            size_t response_len = matrx__cert_mgr_message__get_packed_size(response);
-            *outlen = response_len;
-            *outbuf = (uint8_t*)malloc(response_len);
-            if (*outbuf == NULL) {
-                ESP_LOGE(TAG, "System out of memory");
-                return ESP_ERR_NO_MEM;
-            }
-            matrx__cert_mgr_message__pack(response, *outbuf);
-
-            //free intermediate data
-            matrx__set_cert_request__free_unpacked(cert_mgr_message->set_cert_request, NULL);
-            matrx__cert_mgr_message__free_unpacked(cert_mgr_message, NULL);
-            matrx__set_cert_response__free_unpacked(set_cert_response, NULL);
-            matrx__cert_mgr_message__free_unpacked(response, NULL);
-        }
-
-        return ESP_OK;
-    }
-
-    ESP_LOGE(TAG, "Received empty data");
-    return ESP_FAIL;
-}
-
 void provisioning_task(void* pvParameter) {
     ProvisioningTaskNotification_t notification;
     bool provisioning_started = false;
@@ -273,9 +140,9 @@ void provisioning_task(void* pvParameter) {
             case STOP_PROVISIONING:
                 if (provisioning_started) {
                     ESP_LOGI(TAG, "stopping provisioning");
+                    vTaskDelay(1000);
                     wifi_prov_mgr_stop_provisioning();
                     provisioning_started = false;
-                    vTaskDelete(NULL);
                 }
                 break;
             case START_PROVISIONING:
@@ -286,7 +153,7 @@ void provisioning_task(void* pvParameter) {
                 wifi_prov_mgr_init({ .scheme = wifi_prov_scheme_ble, .scheme_event_handler = WIFI_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM });
                 wifi_prov_mgr_endpoint_create("certmgr");
                 wifi_prov_mgr_start_provisioning(WIFI_PROV_SECURITY_1, provisioning_pop_token, provisioning_device_name, NULL);
-                wifi_prov_mgr_endpoint_register("certmgr", custom_prov_config_data_handler, NULL);
+                wifi_prov_mgr_endpoint_register("certmgr", certmgr_handler, NULL);
                 provisioning_started = true;
                 break;
             case RESET_PROVISIONING:

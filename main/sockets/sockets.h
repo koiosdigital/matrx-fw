@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define SOCKETS_URI "wss://device-api-sec.koiosdigital.net/matrx"
+#define SOCKETS_URI "wss://device.api.koiosdigital.net/matrx"
 
 void sockets_init();
 void sockets_disconnect();

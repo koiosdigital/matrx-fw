@@ -17,10 +17,6 @@
 #include "scheduler.h"
 #include "ota.h"
 
-static const char* TAG = "matrx";
-
-#define DEVELOPER_DEVICE false
-
 extern "C" void app_main(void)
 {
     // Initialize NVS
@@ -41,17 +37,9 @@ extern "C" void app_main(void)
 
     crypto_init();
 
-    while (1) {
-        //dump memory stats
-        ESP_LOGI(TAG, "Free heap: %" PRIu32, esp_get_free_heap_size());
-        ESP_LOGW(TAG, "low watermark: %d", uxTaskGetStackHighWaterMark(NULL));
-        vTaskDelay(pdMS_TO_TICKS(3000));
-    }
-
-
     //scheduler_init();
-    //sockets_init();
+    sockets_init();
     //ota_init();
 
-
+    vTaskSuspend(NULL);
 }

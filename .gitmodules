@@ -1,6 +1,6 @@
 [submodule "components/libwebp"]
 	path = components/libwebp
-	url = https://github.com/acvigue/libwebp
+	url = https://github.com/koiosdigital/libwebp
 [submodule "components/ESP32-HUB75-MatrixPanel-DMA"]
 	path = components/ESP32-HUB75-MatrixPanel-DMA
 	url = https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA

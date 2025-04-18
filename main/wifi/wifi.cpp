@@ -78,7 +78,11 @@ void wifi_init() {
 
     esp_netif_t* netif = esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+
+    //clear credentials
+
     esp_wifi_init(&cfg);
+
     esp_wifi_set_mode(wifi_mode_t::WIFI_MODE_STA);
 
     esp_netif_set_hostname(netif, get_provisioning_device_name());

@@ -37,7 +37,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "connected");
         if (!scheduler_has_schedule()) {
-            //show_fs_sprite("/fs/ready.webp");
+            show_fs_sprite("/fs/ready.webp");
             request_schedule();
         }
         attempt_coredump_upload();
@@ -46,7 +46,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "disconnected");
         //scheduler_pause();
-        //show_fs_sprite("/fs/connect_cloud.webp");
+        show_fs_sprite("/fs/connect_cloud.webp");
         break;
     case WEBSOCKET_EVENT_DATA:
         if (data->payload_offset == 0) {
@@ -74,6 +74,17 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
             }
         }
 
+        break;
+    case WEBSOCKET_EVENT_ERROR:
+        ESP_LOGE(TAG, "error");
+        break;
+    case WEBSOCKET_EVENT_CLOSED:
+        ESP_LOGI(TAG, "closed");
+        free(dbuf);
+        dbuf = NULL;
+        break;
+    default:
+        ESP_LOGI(TAG, "event %" PRIi32, event_id);
         break;
     }
 }
@@ -150,10 +161,11 @@ void handle_message(Matrx__SocketMessage* message)
 void sockets_task(void* pvParameter)
 {
     while (1) {
-        if (crypto_get_state() == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
-            ESP_LOGI(TAG, "device provisioned");
+        if (crypto_get_state() != CryptoState_t::CRYPTO_STATE_VALID_CERT) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        break;
     }
 
     esp_ds_data_ctx_t* ds_data_ctx = crypto_get_ds_data_ctx();
@@ -162,8 +174,8 @@ void sockets_task(void* pvParameter)
         return;
     }
 
-    char* cert = (char*)heap_caps_calloc(2048, sizeof(char), MALLOC_CAP_SPIRAM);
-    size_t cert_len;
+    char* cert = (char*)calloc(4096, sizeof(char));
+    size_t cert_len = 4096;
 
     esp_err_t err = crypto_get_device_cert(cert, &cert_len);
     if (err != ESP_OK) {
@@ -175,8 +187,8 @@ void sockets_task(void* pvParameter)
         .uri = SOCKETS_URI,
         .port = 443,
         .client_cert = cert,
-        .client_cert_len = cert_len,
-        .client_ds_data = ds_data_ctx->esp_ds_data,
+        .client_cert_len = cert_len + 1,
+        .client_ds_data = ds_data_ctx,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
@@ -187,7 +199,8 @@ void sockets_task(void* pvParameter)
 
     while (1)
     {
-        if (xQueueReceive(xSocketsQueue, &message, portMAX_DELAY) == pdTRUE) {
+        ESP_LOGI(TAG, "waiting for message, watermark: %d", uxTaskGetStackHighWaterMark(NULL));
+        if (xQueueReceive(xSocketsQueue, &message, pdMS_TO_TICKS(5000)) == pdTRUE) {
             if (message.message == NULL) {
                 continue;
             }
@@ -212,7 +225,7 @@ void sockets_task(void* pvParameter)
 void sockets_init()
 {
     xSocketsQueue = xQueueCreate(10, sizeof(ProcessableMessage_t));
-    xTaskCreatePinnedToCore(sockets_task, "sockets", 2048, NULL, 5, &xSocketsTask, 1);
+    xTaskCreatePinnedToCore(sockets_task, "sockets", 40000, NULL, 5, &xSocketsTask, 1);
 }
 
 void sockets_connect()
