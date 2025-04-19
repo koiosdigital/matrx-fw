@@ -1,5 +1,4 @@
-#ifndef PINOUT_H
-#define PINOUT_H
+#pragma once
 
 #define DISPLAY_ENABLED false
 #define HAS_VEML6030 true
@@ -26,5 +25,3 @@
 #define I2C_SCL 5
 
 #define VEML_INT_PIN 6
-
-#endif

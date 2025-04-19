@@ -6,7 +6,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 
-#include "crypto.h"
+#include "kd_common.h"
 #include "display.h"
 #include "scheduler.h"
 #include "sprites.h"
@@ -152,14 +152,14 @@ void handle_message(Matrx__SocketMessage* message)
 void sockets_task(void* pvParameter)
 {
     while (1) {
-        if (crypto_get_state() != CryptoState_t::CRYPTO_STATE_VALID_CERT) {
+        if (kd_common_crypto_get_state() != CryptoState_t::CRYPTO_STATE_VALID_CERT) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
         break;
     }
 
-    esp_ds_data_ctx_t* ds_data_ctx = crypto_get_ds_data_ctx();
+    esp_ds_data_ctx_t* ds_data_ctx = kd_common_crypto_get_ctx();
     if (ds_data_ctx == NULL) {
         ESP_LOGE(TAG, "ds data ctx is NULL");
         return;
@@ -168,7 +168,7 @@ void sockets_task(void* pvParameter)
     char* cert = (char*)calloc(4096, sizeof(char));
     size_t cert_len = 4096;
 
-    esp_err_t err = crypto_get_device_cert(cert, &cert_len);
+    esp_err_t err = kd_common_get_device_cert(cert, &cert_len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "failed to get device cert");
         return;

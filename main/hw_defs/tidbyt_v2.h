@@ -1,5 +1,4 @@
-#ifndef PINOUT_H
-#define PINOUT_H
+#pragma once
 
 #define R1_PIN 5
 #define G1_PIN 23
@@ -24,5 +23,3 @@
 #define BTN_A 9
 #define BTN_B 10
 #define BTN_C 11
-
-#endif

@@ -8,14 +8,12 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 
-#include "crypto.h"
-#include "wifi.h"
-#include "provisioning.h"
+#include "kd_common.h"
+
 #include "display.h"
 #include "sockets.h"
 #include "sprites.h"
 #include "scheduler.h"
-#include "ota.h"
 
 extern "C" void app_main(void)
 {
@@ -32,10 +30,7 @@ extern "C" void app_main(void)
     sprites_init();
     display_init();
 
-    provisioning_init();
-    wifi_init();
-
-    crypto_init();
+    kd_common_init();
 
     scheduler_init();
     sockets_init();

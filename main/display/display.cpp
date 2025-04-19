@@ -1,11 +1,16 @@
 #include "display.h"
+#include "pinout.h"
 
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
 #include "esp_log.h"
+#include "esp_event.h"
+#include "wifi_provisioning/manager.h"
 
 #include "webp/demux.h"
+#include "qrcode.h"
+#include "kd_common.h"
 
 static const char* TAG = "display";
 
@@ -34,7 +39,6 @@ void decoder_task(void* pvParameter) {
     bool active = false;
 
     TickType_t anim_start_tick = 0;
-    uint32_t frame_timestamp = 0;
     uint8_t* frame_buffer = NULL;
 
     while (1) {
@@ -105,6 +109,53 @@ void decoder_task(void* pvParameter) {
     }
 }
 
+uint8_t* qr_display_buffer = NULL;
+void prov_display_qr_helper(esp_qrcode_handle_t qrcode) {
+    //We want to center the QR code on the display
+    int qr_size = esp_qrcode_get_size(qrcode);
+    int w, h = 0;
+    get_display_dimensions(&w, &h);
+
+    int x_offset = (w - qr_size) / 2;
+    int y_offset = (h - qr_size) / 2;
+
+    for (int y = 0; y < qr_size; y++) {
+        for (int x = 0; x < qr_size; x++) {
+            if (esp_qrcode_get_module(qrcode, x, y)) {
+                qr_display_buffer[((y + y_offset) * w + (x + x_offset)) * 3] = 255;
+                qr_display_buffer[((y + y_offset) * w + (x + x_offset)) * 3 + 1] = 255;
+                qr_display_buffer[((y + y_offset) * w + (x + x_offset)) * 3 + 2] = 255;
+            }
+        }
+    }
+
+    display_raw_buffer(qr_display_buffer, get_display_buffer_size());
+}
+
+void prov_display_qr() {
+    esp_qrcode_config_t qr_config = {
+        .display_func = prov_display_qr_helper,
+        .max_qrcode_version = 40,
+        .qrcode_ecc_level = ESP_QRCODE_ECC_MED,
+    };
+
+    qr_display_buffer = (uint8_t*)heap_caps_calloc(get_display_buffer_size(), sizeof(uint8_t), MALLOC_CAP_SPIRAM);
+    if (qr_display_buffer == NULL) {
+        ESP_LOGE(TAG, "malloc failed: display buffer");
+        return;
+    }
+    memset(qr_display_buffer, 0, get_display_buffer_size());
+
+    esp_err_t err = esp_qrcode_generate(&qr_config, kd_common_get_provisioning_qr_payload());
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "QR code generation failed");
+    }
+}
+
+void wifi_prov_started(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    prov_display_qr();
+}
+
 void display_init() {
     HUB75_I2S_CFG::i2s_pins pins = {
         .r1 = R1_PIN,
@@ -137,6 +188,8 @@ void display_init() {
     xSemaphoreGive(xWebPSemaphore);
 
     xTaskCreatePinnedToCore(decoder_task, "decoder", 4096, NULL, 3, &xDecoderTask, 1);
+
+    esp_event_handler_register(WIFI_PROV_EVENT, WIFI_PROV_START, &wifi_prov_started, NULL);
 }
 
 void destroy_decoder() {

@@ -3,22 +3,6 @@
 
 #include "ESP32-HUB75-MatrixPanel-I2S-DMA.h"
 
-#ifdef CONFIG_HW_MATRX_V9
-#include "pinouts/matrx_v9.h"
-#endif
-
-#ifdef CONFIG_HW_MATRX_V8
-#include "pinouts/matrx_v8.h"
-#endif
-
-#ifdef CONFIG_HW_TIDBYT_V1
-#include "pinouts/tidbyt_v1.h"
-#endif
-
-#ifdef CONFIG_HW_TIDBYT_V2
-#include "pinouts/tidbyt_v2.h"
-#endif
-
 typedef struct DisplayStatusBar_t {
     bool enabled = false;
     uint8_t r = 0;
