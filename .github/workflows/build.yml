@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - id: set-matrix
-        run: echo "::set-output name=matrix::$(ls build_configs/* | jq -R -s -c 'split("\n")[:-1]')"
+        run: echo "::set-output name=matrix::$(cd build_configs && ls * | jq -R -s -c 'split("\n")[:-1]')"
   build:
     # The type of runner that the job will run on
     runs-on: ubuntu-latest
@@ -38,8 +38,18 @@ jobs:
         run: |
           echo "Replacing SDKCONFIG"
           rm -f sdkconfig.defaults
-          cp ${{ matrix.config }} sdkconfig
+          cp build_configs/${{ matrix.config }} sdkconfig
           echo "SDKCONFIG replaced"
+
+      - name: Set BUILD_VERSION for tagged push
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "Setting BUILD_VERSION from tag"
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          BUILD_VERSION=${TAG_NAME#v}
+          echo "BUILD_VERSION=${BUILD_VERSION}" >> $GITHUB_ENV
+          echo "BUILD_VERSION set to ${BUILD_VERSION}"
+          BUILD_VARIANT=${{ matrix.config }}
 
       - name: idf build
         uses: espressif/esp-idf-ci-action@v1
