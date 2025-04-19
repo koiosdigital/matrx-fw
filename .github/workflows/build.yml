@@ -54,6 +54,7 @@ jobs:
             git clone https://github.com/protobuf-c/protobuf-c
             cd protobuf-c
             ./autogen.sh && ./configure && make && make install
+            cd ..
 
             #build
             idf.py build
