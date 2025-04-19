@@ -111,6 +111,7 @@ XUNIT_RESULT*.xml
 .vale/styles/*
 
 sdkconfig.old
+sdkconfig
 
 #secure files
 flash_encryption_key.bin
