@@ -46,3 +46,14 @@ jobs:
         with:
           esp_idf_version: v5.4
           target: esp32s3
+          command: |
+            # Install protoc-c dependencies
+            apt update -y
+            apt install -y protobuf-compiler autotools-dev autoconf libtool-bin pkg-config libprotoc-dev
+            # Install protoc-c
+            git clone https://github.com/protobuf-c/protobuf-c
+            cd protobuf-c
+            ./autogen.sh && ./configure && make && make install
+
+            #build
+            idf.py build
