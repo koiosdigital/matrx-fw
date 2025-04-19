@@ -5,6 +5,7 @@
 #include "esp_event.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "esp_wifi.h"
 
 #include "kd_common.h"
 #include "display.h"
@@ -151,36 +152,20 @@ void handle_message(Matrx__SocketMessage* message)
 
 void sockets_task(void* pvParameter)
 {
-    while (1) {
-        if (kd_common_crypto_get_state() != CryptoState_t::CRYPTO_STATE_VALID_CERT) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-        break;
-    }
-
     esp_ds_data_ctx_t* ds_data_ctx = kd_common_crypto_get_ctx();
-    if (ds_data_ctx == NULL) {
-        ESP_LOGE(TAG, "ds data ctx is NULL");
-        return;
-    }
-
     char* cert = (char*)calloc(4096, sizeof(char));
     size_t cert_len = 4096;
 
     esp_err_t err = kd_common_get_device_cert(cert, &cert_len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "failed to get device cert");
-        return;
-    }
 
     esp_websocket_client_config_t websocket_cfg = {
         .uri = SOCKETS_URI,
         .port = 443,
         .client_cert = cert,
-        .client_cert_len = cert_len,
+        .client_cert_len = cert_len + 1,
         .client_ds_data = ds_data_ctx,
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .reconnect_timeout_ms = 5000,
     };
 
     client = esp_websocket_client_init(&websocket_cfg);
@@ -212,10 +197,31 @@ void sockets_task(void* pvParameter)
     }
 }
 
+void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT) {
+        sockets_disconnect();
+    }
+    if (event_base == IP_EVENT) {
+        sockets_connect();
+    }
+}
+
 void sockets_init()
 {
     xSocketsQueue = xQueueCreate(10, sizeof(ProcessableMessage_t));
-    xTaskCreatePinnedToCore(sockets_task, "sockets", 8192, NULL, 5, &xSocketsTask, 1);
+
+    while (1) {
+        if (kd_common_crypto_get_state() != CryptoState_t::CRYPTO_STATE_VALID_CERT) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        break;
+    }
+
+    xTaskCreatePinnedToCore(sockets_task, "sockets", 4096, NULL, 5, &xSocketsTask, 1);
+
+    esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL);
 }
 
 void sockets_connect()
