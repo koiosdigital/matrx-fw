@@ -38,7 +38,7 @@ jobs:
         run: |
           echo "Replacing SDKCONFIG"
           rm -f sdkconfig.defaults
-          cp build_variants/${{ matrix.config }} sdkconfig
+          cp ${{ matrix.config }} sdkconfig
           echo "SDKCONFIG replaced"
 
       - name: idf build
