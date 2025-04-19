@@ -387,7 +387,6 @@ CryptoState_t crypto_get_state() {
 }
 
 esp_err_t crypto_init(void) {
-    //will most likely only run in factory, so we can keygen here.
     crypto_keygen_if_needed();
 
     if (crypto_state == CRYPTO_STATE_KEY_GENERATED) {
