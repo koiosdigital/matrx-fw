@@ -7,3 +7,6 @@
 [submodule "components/MATRX-protobufs"]
 	path = components/MATRX-protobufs
 	url = https://github.com/koiosdigital/MATRX-protobufs
+[submodule "components/kd_common"]
+	path = components/kd_common
+	url = https://github.com/koiosdigital/kd_common
