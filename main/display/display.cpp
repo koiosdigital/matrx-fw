@@ -7,10 +7,12 @@
 #include "esp_log.h"
 #include "esp_event.h"
 #include "wifi_provisioning/manager.h"
+#include "protocomm_ble.h"
 
 #include "webp/demux.h"
 #include "qrcode.h"
 #include "kd_common.h"
+#include "sprites.h"
 
 static const char* TAG = "display";
 
@@ -178,8 +180,12 @@ void prov_display_qr() {
     }
 }
 
-void wifi_prov_started(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+void wifi_prov_connected(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     prov_display_qr();
+}
+
+void wifi_prov_started(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    show_fs_sprite("/fs/ble_prov.webp");
 }
 
 void display_init() {
@@ -215,6 +221,8 @@ void display_init() {
 
     xTaskCreatePinnedToCore(decoder_task, "decoder", 4096, NULL, 3, &xDecoderTask, 1);
 
+    //Display QR code once connected to endpoint device
+    esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, PROTOCOMM_TRANSPORT_BLE_CONNECTED, &wifi_prov_connected, NULL);
     esp_event_handler_register(WIFI_PROV_EVENT, WIFI_PROV_START, &wifi_prov_started, NULL);
 }
 
