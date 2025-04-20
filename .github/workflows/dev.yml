@@ -48,10 +48,41 @@ jobs:
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.4.1
+          extra_docker_args: -v ./output:/output
           target: ${{ env.IDF_TARGET }}
           command: |
             apt update -y
             apt install -y protobuf-compiler protobuf-c-compiler
 
             #build
-            idf.py build
+            idf.py build | tee build.log
+
+            # Extract flash_mode, flash_size, flash_freq, and binaries from build.log
+            FLASH_LINE=$(grep "python -m esptool" build.log | grep -v "@flash_args" | tail -n 1)
+
+            BINARY_INFO=$(grep -oP '^\S+\.bin binary size \S+ bytes' build.log | tail -n 1)
+            BINARY_FILE=$(echo "$BINARY_INFO" | awk '{print $1}')
+
+            FLASH_MODE=$(echo "$FLASH_LINE" | grep -oP '(?<=--flash_mode )\S+')
+            FLASH_SIZE=$(echo "$FLASH_LINE" | grep -oP '(?<=--flash_size )\S+')
+            FLASH_FREQ=$(echo "$FLASH_LINE" | grep -oP '(?<=--flash_freq )\S+')
+            BINARIES=$(echo "$FLASH_LINE" | grep -oP '(?<=--flash_freq \S+ ).*')
+
+            #merge artifacts
+            esptool.py --chip ${{ env.IDF_TARGET }} merge_bin -o factory_flash.bin --flash_mode $FLASH_MODE --flash_size $FLASH_SIZE --flash_freq $FLASH_FREQ $BINARIES
+
+            #move artifacts
+            mv factory_flash.bin output/merged.bin
+            mv build/$BINARY_FILE output/app.bin
+
+      - name: Upload merged binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.config }}_merged.bin
+          path: output/merged.bin
+
+      - name: Upload OTA binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.config }}_app.bin
+          path: output/app.bin
