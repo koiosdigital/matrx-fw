@@ -41,7 +41,7 @@ jobs:
 
       - name: Extract CONFIG_IDF_TARGET
         run: |
-          IDF_TARGET=$(grep '^CONFIG_IDF_TARGET=' sdkconfig | cut -d'=' -f2)
+          IDF_TARGET=$(grep '^CONFIG_IDF_TARGET=' sdkconfig | cut -d'=' -f2 | tr -d '"')
           echo "IDF_TARGET=${IDF_TARGET}" >> $GITHUB_ENV
 
       - name: idf build
