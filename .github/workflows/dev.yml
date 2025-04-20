@@ -44,6 +44,11 @@ jobs:
           IDF_TARGET=$(grep '^CONFIG_IDF_TARGET=' sdkconfig | cut -d'=' -f2)
           echo "IDF_TARGET=${IDF_TARGET}" >> $GITHUB_ENV
 
+      - name: Cache Docker images.
+        uses: ScribeMD/docker-cache@0.5.0
+        with:
+          key: docker-${{ runner.os }}-v5.4.1
+
       - name: idf build
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -62,7 +67,6 @@ jobs:
             echo "FLASH_LINE: $FLASH_LINE"
 
             BINARY_INFO=$(grep -oP "^\S+\.bin binary size \S+ bytes" build.log | tail -n 1)
-            echo "BINARY_INFO: $BINARY_INFO"
 
             BINARY_FILE=$(echo "$BINARY_INFO" | awk "{print $1}")
 
@@ -76,8 +80,8 @@ jobs:
             esptool.py --chip ${{ env.IDF_TARGET }} merge_bin -o factory_flash.bin --flash_mode $FLASH_MODE --flash_size $FLASH_SIZE --flash_freq $FLASH_FREQ $BINARIES
 
             #move artifacts
-            mv factory_flash.bin output/merged.bin
-            mv build/$BINARY_FILE output/app.bin
+            mv factory_flash.bin /output/merged.bin
+            mv build/$BINARY_FILE /output/app.bin
 
       - name: Upload merged binary
         uses: actions/upload-artifact@v4
