@@ -4,6 +4,8 @@ name: Development build
 # Controls when the action will run.
 on:
   push:
+    branches:
+      - main
     tags-ignore:
       - "*"
   pull_request:
