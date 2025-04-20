@@ -1,71 +1,31 @@
 menu "MATRX hardware configuration"
-
-    orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
-
-    choice BLINK_LED
-        prompt "PCB type"
-        default HW_MATRX_V9
-        help
-            Select the PCB type
-
-        config HW_MATRX_V9
-            bool "MATRX v9"
-        config HW_MATRX_V8
-            bool "MATRX v8"
-        config HW_TIDBYT_V1
-            bool "TIDBYT v1"
-        config HW_TIDBYT_V2
-            bool "TIDBYT v2"
-    endchoice
-
-    config HW_TYPE
-        int
-        default 0
-        help
-            The HW_TYPE is used to identify the PCB type.
-            0 = MATRIX v9
-            1 = MATRIX v8
-            2 = TIDBYT v1
-            3 = TIDBYT v2
-        default 0 if HW_MATRX_V9
-        default 1 if HW_MATRX_V8
-        default 2 if HW_TIDBYT_V1
-        default 3 if HW_TIDBYT_V2
-        depends on HW_MATRX_V9 || HW_MATRX_V8 || HW_TIDBYT_V1 || HW_TIDBYT_V2
-
-    choice MATRIX_SIZE
-        prompt "LED matrix size"
-        default MATRIX_SIZE_64x32
-        help
-            Select the size of the LED matrix
-        config MATRIX_SIZE_64x32
-            bool "64x32"
-        config MATRIX_SIZE_128x64
-            bool "128x64"
-        config MATRIX_SIZE_64x64
-            bool "64x64"
-    endchoice
-
     config MATRIX_WIDTH
         int
-        default 64 if MATRIX_SIZE_64x32
-        default 128 if MATRIX_SIZE_128x64
-        default 64 if MATRIX_SIZE_64x64
+        range 1 128
+        default 64
         help
             The width of the LED matrix in pixels.
             64 = 64 pixels wide
             128 = 128 pixels wide
-        depends on MATRIX_SIZE_64x32 || MATRIX_SIZE_128x64 || MATRIX_SIZE_64x64
 
     config MATRIX_HEIGHT
         int
-        default 32 if MATRIX_SIZE_64x32
-        default 64 if MATRIX_SIZE_128x64
-        default 64 if MATRIX_SIZE_64x64
+        range 1 64
+        default 32
         help
             The height of the LED matrix in pixels.
             32 = 32 pixels high
             64 = 64 pixels high
-        depends on MATRIX_SIZE_64x32 || MATRIX_SIZE_128x64 || MATRIX_SIZE_64x64
+
+    config HW_TYPE
+        int
+        range 0 3
+        default 0
+        help
+            The type of hardware being used.
+            0 = MATRX_v9
+            1 = MATRX_v8
+            2 = TIDBYT_v1
+            3 = TIDBYT_v2
 
 endmenu

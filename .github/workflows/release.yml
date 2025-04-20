@@ -116,7 +116,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
-          merge-multiple: true
+      - name: Flatten artifacts folder
+        run: |
+          #tree artifacts, list all files
+          find ./artifacts -type f -print
+
+          find ./artifacts -mindepth 2 -type f -exec mv -t ./artifacts {} +
+          find ./artifacts -mindepth 1 -type d -exec rm -rf {} +
       - name: Create release
         uses: ncipollo/release-action@v1
         with:
