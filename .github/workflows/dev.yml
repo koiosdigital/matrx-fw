@@ -41,7 +41,7 @@ jobs:
 
       - name: Extract CONFIG_IDF_TARGET
         run: |
-          IDF_TARGET=$(grep '^CONFIG_IDF_TARGET=' sdkconfig | cut -d'=' -f2 | tr -d '"')
+          IDF_TARGET=$(grep '^CONFIG_IDF_TARGET=' sdkconfig | cut -d'=' -f2)
           echo "IDF_TARGET=${IDF_TARGET}" >> $GITHUB_ENV
 
       - name: idf build
@@ -63,10 +63,15 @@ jobs:
             BINARY_INFO=$(grep -oP '^\S+\.bin binary size \S+ bytes' build.log | tail -n 1)
             BINARY_FILE=$(echo "$BINARY_INFO" | awk '{print $1}')
 
-            FLASH_MODE=$(echo "$FLASH_LINE" | grep -oP '(?<=--flash_mode )\S+')
-            FLASH_SIZE=$(echo "$FLASH_LINE" | grep -oP '(?<=--flash_size )\S+')
-            FLASH_FREQ=$(echo "$FLASH_LINE" | grep -oP '(?<=--flash_freq )\S+')
-            BINARIES=$(echo "$FLASH_LINE" | grep -oP '(?<=--flash_freq \S+ ).*')
+            FLASH_MODE=$(echo "$FLASH_LINE" | grep -oE '--flash_mode [^ ]+' | awk '{print $2}')
+            FLASH_SIZE=$(echo "$FLASH_LINE" | grep -oE '--flash_size [^ ]+' | awk '{print $2}')
+            FLASH_FREQ=$(echo "$FLASH_LINE" | grep -oE '--flash_freq [^ ]+' | awk '{print $2}')
+            BINARIES=$(echo "$FLASH_LINE" | sed -n 's/.*--flash_freq [^ ]\+ //p')
+
+            echo "FLASH MODE : $FLASH_MODE"
+            echo "FLASH SIZE : $FLASH_SIZE"
+            echo "FLASH FREQ : $FLASH_FREQ"
+            echo "BINARIES : $BINARIES"
 
             #merge artifacts
             esptool.py --chip ${{ env.IDF_TARGET }} merge_bin -o factory_flash.bin --flash_mode $FLASH_MODE --flash_size $FLASH_SIZE --flash_freq $FLASH_FREQ $BINARIES
