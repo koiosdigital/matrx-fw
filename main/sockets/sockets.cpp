@@ -156,7 +156,7 @@ void sockets_task(void* pvParameter)
     char* cert = (char*)calloc(4096, sizeof(char));
     size_t cert_len = 4096;
 
-    esp_err_t err = kd_common_get_device_cert(cert, &cert_len);
+    kd_common_get_device_cert(cert, &cert_len);
 
     esp_websocket_client_config_t websocket_cfg = {
         .uri = SOCKETS_URI,
