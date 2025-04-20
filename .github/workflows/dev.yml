@@ -59,15 +59,25 @@ jobs:
 
             # Extract flash_mode, flash_size, flash_freq, and binaries from build.log
             FLASH_LINE=$(grep "python -m esptool" build.log | grep -v "@flash_args" | tail -n 1)
+            echo "FLASH_LINE: $FLASH_LINE"
 
             BINARY_INFO=$(grep -oP '^\S+\.bin binary size \S+ bytes' build.log | tail -n 1)
+            echo "BINARY_INFO: $BINARY_INFO"
+
             BINARY_FILE=$(echo "$BINARY_INFO" | awk '{print $1}')
+            echo "BINARY_FILE: $BINARY_FILE"
 
             # Extract flash_mode, flash_size, flash_freq, and binaries
             FLASH_MODE=$(echo "$FLASH_LINE" | sed -n 's/.*--flash_mode \([^ ]\+\) .*/\1/p')
+            echo "FLASH_MODE: $FLASH_MODE"
+
             FLASH_SIZE=$(echo "$FLASH_LINE" | sed -n 's/.*--flash_size \([^ ]\+\) .*/\1/p')
+            echo "FLASH_SIZE: $FLASH_SIZE"
             FLASH_FREQ=$(echo "$FLASH_LINE" | sed -n 's/.*--flash_freq \([^ ]\+\) .*/\1/p')
+            echo "FLASH_FREQ: $FLASH_FREQ"
+
             BINARIES=$(echo "$FLASH_LINE" | sed -n 's/.*--flash_freq [^ ]\+ //p')
+            echo "BINARIES: $BINARIES"
 
             #merge artifacts
             esptool.py --chip ${{ env.IDF_TARGET }} merge_bin -o factory_flash.bin --flash_mode $FLASH_MODE --flash_size $FLASH_SIZE --flash_freq $FLASH_FREQ $BINARIES

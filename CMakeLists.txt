@@ -14,6 +14,8 @@ add_compile_definitions(FIRMWARE_VARIANT=development)
 ENDIF()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+set(COMPONENTS esptool_py main esp_lcd)
 project(MATRX-fw)
 
 
