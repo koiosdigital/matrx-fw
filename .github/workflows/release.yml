@@ -54,6 +54,11 @@ jobs:
           echo "BUILD_VERSION set to ${BUILD_VERSION}"
           echo "BUILD_VARIANT=${{ matrix.config }}" >> $GITHUB_ENV
 
+      - name: Cache Docker images.
+        uses: AndreKurait/docker-cache@0.6.0
+        with:
+          key: docker-${{ runner.os }}-v5.4.1
+
       - name: idf build
         uses: espressif/esp-idf-ci-action@v1
         with:
