@@ -53,6 +53,7 @@ jobs:
           echo "BUILD_VERSION=${BUILD_VERSION}" >> $GITHUB_ENV
           echo "BUILD_VERSION set to ${BUILD_VERSION}"
           echo "BUILD_VARIANT=${{ matrix.config }}" >> $GITHUB_ENV
+          mkdir output
 
       - name: Cache Docker images.
         uses: AndreKurait/docker-cache@0.6.0
@@ -64,6 +65,7 @@ jobs:
         with:
           esp_idf_version: v5.4.1
           target: ${{ env.IDF_TARGET }}
+          extra_docker_args: -v ./output:/output
           command: |
             # Set up the environment
             export BUILD_VERSION=${{ env.BUILD_VERSION }}
