@@ -118,11 +118,18 @@ jobs:
           path: ./artifacts
       - name: Flatten artifacts folder
         run: |
-          #tree artifacts, list all files
+          # List all files for debugging
           find ./artifacts -type f -print
 
-          find ./artifacts -mindepth 2 -type f -exec mv -t ./artifacts {} +
-          find ./artifacts -mindepth 1 -type d -exec rm -rf {} +
+          artifacts_dir="./artifacts"
+
+          for folder in "$artifacts_dir"/*/; do
+              folder_name=$(basename "$folder")
+              file_path=$(find "$folder" -type f -print -quit)
+              mv -v "$file_path" "$artifacts_dir/$folder_name.tmp"
+              rmdir "$folder"
+              mv -v "$artifacts_dir/$folder_name.tmp" "$artifacts_dir/$folder_name"
+          done
       - name: Create release
         uses: ncipollo/release-action@v1
         with:
