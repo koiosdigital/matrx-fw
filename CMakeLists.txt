@@ -4,10 +4,13 @@ cmake_minimum_required(VERSION 3.16)
 
 IF(DEFINED ENV{BUILD_VERSION})
 set(PROJECT_VER ENV{BUILD_VERSION})
+message("Building production project with version $ENV{BUILD_VERSION}")
 add_compile_definitions(ENABLE_OTA)
 add_compile_definitions(FIRMWARE_VARIANT=$ENV{BUILD_VARIANT})
 ELSE()
+message("Building development project")
 set(PROJECT_VER "0.0.1")
+add_compile_definitions(FIRMWARE_VARIANT=development)
 ENDIF()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

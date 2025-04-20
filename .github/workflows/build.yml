@@ -35,6 +35,16 @@ jobs:
         with:
           submodules: "recursive"
 
+      - name: Install ESP-IDF
+        uses: espressif/install-esp-idf-action@v1
+        with:
+          version: "v5.4.1"
+
+      - name: Install Protobuf compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler protobuf-c-compiler
+
       - name: Handle SDKCONFIG overlay
         run: |
           awk 'FNR==NR { if ($0 ~ /^CONFIG_[A-Za-z0-9_]*=/) { split($0,a,"="); cfg[a[1]]=$0 } next } $0 ~ /^CONFIG_[A-Za-z0-9_]*=/ { key=substr($0,1,index($0,"=")-1); print (key in cfg ? cfg[key] : $0); next } 1; END { for (k in cfg) if (!seen[k]++) print cfg[k] }' variants/${{matrix.config}} sdkconfig > temp && mv temp sdkconfig
@@ -54,14 +64,7 @@ jobs:
           echo "BUILD_VERSION set to ${BUILD_VERSION}"
           BUILD_VARIANT=${{ matrix.config }}
 
-      - name: idf build
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          esp_idf_version: v5.4.1
-          target: ${{ env.IDF_TARGET }}
-          command: |
-            apt update -y
-            apt install -y protobuf-compiler protobuf-c-compiler
-
-            #build
-            idf.py build
+      - name: Build Project
+        run: |
+          idf.py set-target ${{ env.IDF_TARGET }}
+          idf.py build
