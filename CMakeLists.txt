@@ -10,10 +10,7 @@ add_compile_definitions(FIRMWARE_VARIANT="$ENV{BUILD_VARIANT}")
 ELSE()
 message("Building development project")
 set(PROJECT_VER "0.0.1")
-#add_compile_definitions(FIRMWARE_VARIANT=development)
-
-add_compile_definitions(ENABLE_OTA)
-add_compile_definitions(FIRMWARE_VARIANT="matrx_v9_64x64")
+add_compile_definitions(FIRMWARE_VARIANT="devel")
 ENDIF()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

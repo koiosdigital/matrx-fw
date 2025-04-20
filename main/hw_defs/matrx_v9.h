@@ -15,7 +15,7 @@
 #define B_PIN  15
 #define C_PIN  12
 #define D_PIN  13
-#define E_PIN  27
+#define E_PIN  17
 
 #define LAT_PIN 11
 #define OE_PIN  9
