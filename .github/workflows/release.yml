@@ -52,7 +52,7 @@ jobs:
           BUILD_VERSION=${TAG_NAME#v}
           echo "BUILD_VERSION=${BUILD_VERSION}" >> $GITHUB_ENV
           echo "BUILD_VERSION set to ${BUILD_VERSION}"
-          BUILD_VARIANT=${{ matrix.config }}
+          echo "BUILD_VARIANT=${{ matrix.config }}" >> $GITHUB_ENV
 
       - name: idf build
         uses: espressif/esp-idf-ci-action@v1
@@ -60,6 +60,10 @@ jobs:
           esp_idf_version: v5.4.1
           target: ${{ env.IDF_TARGET }}
           command: |
+            # Set up the environment
+            export BUILD_VERSION=${{ env.BUILD_VERSION }}
+            export BUILD_VARIANT=${{ matrix.config }}
+
             apt update -y
             apt install -y protobuf-compiler protobuf-c-compiler
 
