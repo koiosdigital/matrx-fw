@@ -113,13 +113,10 @@ jobs:
     needs: build
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: ./artifacts
-      - name: Flatten artifacts folder
-        run: |
-          find ./artifacts -mindepth 2 -type f -exec mv -t ./artifacts {} +
-          find ./artifacts -mindepth 1 -type d -exec rm -rf {} +
+          merge-multiple: true
       - name: Create release
         uses: ncipollo/release-action@v1
         with:
