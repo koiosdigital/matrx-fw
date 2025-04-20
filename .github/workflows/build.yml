@@ -10,13 +10,14 @@ on:
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   variants:
+    name: Generate build variants
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v2
       - id: set-matrix
-        run: echo "::set-output name=matrix::$(cd build_configs && ls * | jq -R -s -c 'split("\n")[:-1]')"
+        run: echo "::set-output name=matrix::$(cd variants && ls * | jq -R -s -c 'split("\n")[:-1]')"
   build:
     # The type of runner that the job will run on
     runs-on: ubuntu-latest
@@ -34,12 +35,14 @@ jobs:
         with:
           submodules: "recursive"
 
-      - name: Replace SDKCONFIG
+      - name: Handle SDKCONFIG overlay
         run: |
-          echo "Replacing SDKCONFIG"
-          rm -f sdkconfig.defaults
-          cp build_configs/${{ matrix.config }} sdkconfig
-          echo "SDKCONFIG replaced"
+          awk 'FNR==NR { if ($0 ~ /^CONFIG_[A-Za-z0-9_]*=/) { split($0,a,"="); cfg[a[1]]=$0 } next } $0 ~ /^CONFIG_[A-Za-z0-9_]*=/ { key=substr($0,1,index($0,"=")-1); print (key in cfg ? cfg[key] : $0); next } 1; END { for (k in cfg) if (!seen[k]++) print cfg[k] }' variants/${{matrix.config}} sdkconfig > temp && mv temp sdkconfig
+
+      - name: Extract CONFIG_IDF_TARGET
+        run: |
+          IDF_TARGET=$(grep '^CONFIG_IDF_TARGET=' sdkconfig | cut -d'=' -f2)
+          echo "IDF_TARGET=${IDF_TARGET}" >> $GITHUB_ENV
 
       - name: Set BUILD_VERSION for tagged push
         if: startsWith(github.ref, 'refs/tags/')
@@ -54,8 +57,8 @@ jobs:
       - name: idf build
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.4
-          target: esp32s3
+          esp_idf_version: v5.4.1
+          target: ${{ env.IDF_TARGET }}
           command: |
             apt update -y
             apt install -y protobuf-compiler protobuf-c-compiler

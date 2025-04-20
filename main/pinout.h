@@ -1,19 +1,19 @@
 #ifndef PINOUT_H
 #define PINOUT_H
 
-#ifdef CONFIG_HW_MATRX_V9
+#if CONFIG_HW_TYPE == 0
 #include "hw_defs/matrx_v9.h"
 #endif
 
-#ifdef CONFIG_HW_MATRX_V8
+#if CONFIG_HW_TYPE == 1
 #include "hw_defs/matrx_v8.h"
 #endif
 
-#ifdef CONFIG_HW_TIDBYT_V1
+#if CONFIG_HW_TYPE == 2
 #include "hw_defs/tidbyt_v1.h"
 #endif
 
-#ifdef CONFIG_HW_TIDBYT_V2
+#if CONFIG_HW_TYPE == 3
 #include "hw_defs/tidbyt_v2.h"
 #endif
 
