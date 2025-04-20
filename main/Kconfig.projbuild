@@ -1,7 +1,6 @@
 menu "MATRX hardware configuration"
     config MATRIX_WIDTH
-        int
-        range 1 128
+        int "Matrix width"
         default 64
         help
             The width of the LED matrix in pixels.
@@ -9,8 +8,7 @@ menu "MATRX hardware configuration"
             128 = 128 pixels wide
 
     config MATRIX_HEIGHT
-        int
-        range 1 64
+        int "Matrix height"
         default 32
         help
             The height of the LED matrix in pixels.
@@ -18,14 +16,12 @@ menu "MATRX hardware configuration"
             64 = 64 pixels high
 
     config HW_TYPE
-        int
-        range 0 3
-        default 0
+        int "Hardware type"
+        default 1
         help
             The type of hardware being used.
-            0 = MATRX_v9
-            1 = MATRX_v8
-            2 = TIDBYT_v1
-            3 = TIDBYT_v2
-
+            1 = MATRX_v9
+            2 = MATRX_v8
+            3 = TIDBYT_v1
+            4 = TIDBYT_v2
 endmenu
