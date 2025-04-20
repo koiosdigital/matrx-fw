@@ -43,6 +43,7 @@ jobs:
         run: |
           IDF_TARGET=$(grep '^CONFIG_IDF_TARGET=' sdkconfig | cut -d'=' -f2)
           echo "IDF_TARGET=${IDF_TARGET}" >> $GITHUB_ENV
+          mkdir output
 
       - name: Cache Docker images.
         uses: ScribeMD/docker-cache@0.5.0
@@ -64,7 +65,6 @@ jobs:
 
             # Extract flash_mode, flash_size, flash_freq, and binaries from build.log
             FLASH_LINE=$(grep "python -m esptool" build.log | grep -v "@flash_args" | tail -n 1)
-            echo "FLASH_LINE: $FLASH_LINE"
 
             BINARY_INFO=$(grep -oP "^\S+\.bin binary size \S+ bytes" build.log | tail -n 1)
 
@@ -78,6 +78,9 @@ jobs:
 
             #merge artifacts
             esptool.py --chip ${{ env.IDF_TARGET }} merge_bin -o factory_flash.bin --flash_mode $FLASH_MODE --flash_size $FLASH_SIZE --flash_freq $FLASH_FREQ $BINARIES
+
+            ls build
+            echo "BINARY_FILE: $BINARY_FILE"
 
             #move artifacts
             mv factory_flash.bin /output/merged.bin
