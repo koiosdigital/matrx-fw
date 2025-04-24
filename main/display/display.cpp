@@ -6,6 +6,7 @@
 
 #include "esp_log.h"
 #include "esp_event.h"
+#include "esp_wifi.h"
 #include "wifi_provisioning/manager.h"
 #include "protocomm_ble.h"
 
@@ -66,6 +67,7 @@ void decoder_task(void* pvParameter) {
 
     TickType_t anim_start_tick = 0;
     uint8_t* frame_buffer = NULL;
+    int last_timestamp = 0;
 
     while (1) {
         //wait for notification, does not run if we're currently displaying a sprite on the display
@@ -104,15 +106,6 @@ void decoder_task(void* pvParameter) {
 
             xSemaphoreGive(xWebPSemaphore);
 
-            //wait to display frame if necessary
-            if (anim_start_tick != 0) {
-                TickType_t current_tick = xTaskGetTickCount();
-                TickType_t should_display_at = anim_start_tick + pdMS_TO_TICKS(timestamp);
-                if (current_tick < should_display_at) {
-                    vTaskDelay(should_display_at - current_tick);
-                }
-            }
-
             //display the frame
             if (frame_buffer == NULL) {
                 ESP_LOGE(TAG, "frame buffer is null");
@@ -133,6 +126,13 @@ void decoder_task(void* pvParameter) {
                 dma_display->drawFastHLine(0, 0, CONFIG_MATRIX_WIDTH, current_status_bar.r, current_status_bar.g, current_status_bar.b);
             }
 #endif
+
+            //wait to display frame if necessary
+            int delay = timestamp - last_timestamp;
+            last_timestamp = timestamp;
+            if (delay > 0) {
+                xTaskDelayUntil(&anim_start_tick, pdMS_TO_TICKS(delay));
+            }
         }
     }
 }
@@ -188,6 +188,25 @@ void wifi_prov_started(void* arg, esp_event_base_t event_base, int32_t event_id,
     show_fs_sprite("/fs/ble_prov.webp");
 }
 
+void provisioning_event_handler2(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    static int wifiConnectionAttempts = 0;
+    if (event_base == WIFI_EVENT) {
+        switch (event_id) {
+        case WIFI_EVENT_STA_START: {
+            wifi_config_t wifi_cfg;
+            esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg);
+
+            if (strlen((const char*)wifi_cfg.sta.ssid) != 0) {
+                show_fs_sprite("/fs/connect_wifi.webp");
+                break;
+            }
+            break;
+        }
+
+        }
+    }
+}
+
 void display_init() {
     HUB75_I2S_CFG::i2s_pins pins = {
         .r1 = R1_PIN,
@@ -213,7 +232,7 @@ void display_init() {
 
     dma_display->begin();
     dma_display->setBrightness(32);
-    dma_display->fillScreenRGB888(255, 255, 255);
+    dma_display->fillScreenRGB888(0, 0, 0);
 #endif
 
     xWebPSemaphore = xSemaphoreCreateBinary();
@@ -224,6 +243,10 @@ void display_init() {
     //Display QR code once connected to endpoint device
     esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, PROTOCOMM_TRANSPORT_BLE_CONNECTED, &wifi_prov_connected, NULL);
     esp_event_handler_register(WIFI_PROV_EVENT, WIFI_PROV_START, &wifi_prov_started, NULL);
+    esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START, &provisioning_event_handler2, NULL);
+
+    show_fs_sprite("/fs/boot.webp");
+    vTaskDelay(pdMS_TO_TICKS(1200));
 }
 
 esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
@@ -255,7 +278,7 @@ void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
 
     for (int y = 0; y < CONFIG_MATRIX_HEIGHT; y++) {
         for (int x = 0; x < CONFIG_MATRIX_WIDTH; x++) {
-            int px = (y * CONFIG_MATRIX_HEIGHT + x) * 3;
+            int px = (y * CONFIG_MATRIX_WIDTH + x) * 3;
             dma_display->drawPixelRGB888(x, y, p_raw_buf[px], p_raw_buf[px + 1], p_raw_buf[px + 2]);
         }
     }

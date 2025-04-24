@@ -19,10 +19,10 @@ extern "C" void app_main(void)
     //event loop
     esp_event_loop_create_default();
 
-    kd_common_init();
-
     sprites_init();
     display_init();
+
+    kd_common_init();
 
     scheduler_init();
     sockets_init();

@@ -150,8 +150,28 @@ void handle_message(Matrx__SocketMessage* message)
     matrx__socket_message__free_unpacked(message, NULL);
 }
 
+void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT) {
+        sockets_disconnect();
+    }
+    if (event_base == IP_EVENT) {
+        sockets_connect();
+    }
+}
+
 void sockets_task(void* pvParameter)
 {
+    while (1) {
+        if (kd_common_crypto_get_state() != CryptoState_t::CRYPTO_STATE_VALID_CERT) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        break;
+    }
+
+    esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL);
+
     esp_ds_data_ctx_t* ds_data_ctx = kd_common_crypto_get_ctx();
     char* cert = (char*)calloc(4096, sizeof(char));
     size_t cert_len = 4096;
@@ -197,31 +217,11 @@ void sockets_task(void* pvParameter)
     }
 }
 
-void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT) {
-        sockets_disconnect();
-    }
-    if (event_base == IP_EVENT) {
-        sockets_connect();
-    }
-}
-
 void sockets_init()
 {
     xSocketsQueue = xQueueCreate(10, sizeof(ProcessableMessage_t));
 
-    while (1) {
-        if (kd_common_crypto_get_state() != CryptoState_t::CRYPTO_STATE_VALID_CERT) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-        break;
-    }
-
     xTaskCreatePinnedToCore(sockets_task, "sockets", 4096, NULL, 5, &xSocketsTask, 1);
-
-    esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event_handler, NULL);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL);
 }
 
 void sockets_connect()
