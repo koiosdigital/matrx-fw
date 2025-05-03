@@ -89,18 +89,45 @@ jobs:
             FLASH_FREQ=$(echo "$FLASH_LINE" | sed -n "s/.*--flash_freq \([^ ]\+\) .*/\1/p")
             BINARIES=$(echo "$FLASH_LINE" | sed -n "s/.*--flash_freq [^ ]\+ //p")
 
-            #merge artifacts
-            esptool.py --chip ${{ env.IDF_TARGET }} merge_bin -o factory_flash.bin --flash_mode $FLASH_MODE --flash_size $FLASH_SIZE --flash_freq $FLASH_FREQ $BINARIES
-
             #move artifacts
-            mv factory_flash.bin /output/merged.bin
-            mv build/$BINARY_FILE /output/app.bin
+            cp build/$BINARY_FILE /output/app.bin
 
-      - name: Upload merged binary
+            zip_name="factory.zip"
+            json_file="flash_files.json"
+
+            # Start JSON array
+            echo "[" > "$json_file"
+
+            # Process pairs and build JSON
+            first=1
+            while read -r offset file; do
+                base_file=$(basename "$file")
+                zip -j "$zip_name" "$file"  # add file to zip, stripping folders
+                if [ $first -eq 1 ]; then
+                    first=0
+                else
+                    echo "," >> "$json_file"
+                fi
+                printf "  {\"offset\": \"%s\", \"file\": \"%s\"}" "$offset" "$base_file" >> "$json_file"
+            done < <(echo "$BINARIES" | xargs -n 2)
+
+            # Close JSON array
+            echo -e "\n]" >> "$json_file"
+
+            # Add JSON to zip
+            zip -j "$zip_name" "$json_file"
+
+            # Optionally, remove the standalone JSON file
+            rm "$json_file"
+
+            # Move the zip file to the output directory
+            mv "$zip_name" /output/
+
+      - name: Upload factory zip
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.config }}_merged.bin
-          path: output/merged.bin
+          name: ${{ matrix.config }}_factory.zip
+          path: output/factory.zip
 
       - name: Upload OTA binary
         uses: actions/upload-artifact@v4
