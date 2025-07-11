@@ -42,7 +42,7 @@ ScheduleItem_t* find_schedule_item(uint8_t* schedule_item_uuid) {
     return NULL;
 }
 
-void scheduler_set_schedule(Matrx__ScheduleResponse* schedule_response) {
+void scheduler_set_schedule(Kd__ScheduleResponse* schedule_response) {
     if (schedule_response->n_schedule_items == 0) {
         ESP_LOGI(TAG, "no schedule items");
         scheduler_clear();
@@ -53,7 +53,7 @@ void scheduler_set_schedule(Matrx__ScheduleResponse* schedule_response) {
 
     size_t n_schedule_items = schedule_response->n_schedule_items;
     for (int i = 0; i < n_schedule_items; i++) {
-        Matrx__ScheduleItem* item = schedule_response->schedule_items[i];
+        Kd__ScheduleItem* item = schedule_response->schedule_items[i];
 
         if (item->uuid.len != UUID_SIZE_BYTES) {
             ESP_LOGE(TAG, "invalid UUID size");

@@ -10,3 +10,6 @@
 [submodule "components/kd_common"]
 	path = components/kd_common
 	url = https://github.com/koiosdigital/kd_common
+[submodule "components/protobufs"]
+	path = components/protobufs
+	url = https://github.com/koiosdigital/protobufs

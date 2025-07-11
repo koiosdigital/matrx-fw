@@ -12,7 +12,9 @@
 #include "scheduler.h"
 #include "sprites.h"
 
-#include "matrx.pb-c.h"
+#include "kd_matrx.pb-c.h"
+#include "kd_global.pb-c.h"
+
 #include "cJSON.h"
 #include <esp_partition.h>
 #include <mbedtls/base64.h>
@@ -81,7 +83,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
     }
 }
 
-void handle_schedule_response(Matrx__ScheduleResponse* response)
+void handle_schedule_response(Kd__ScheduleResponse* response)
 {
     if (response->n_schedule_items == 0) {
         ESP_LOGI(TAG, "no schedule items");
@@ -92,7 +94,7 @@ void handle_schedule_response(Matrx__ScheduleResponse* response)
     scheduler_set_schedule(response);
 }
 
-void handle_render_response(Matrx__RenderResponse* response)
+void handle_render_response(Kd__RenderResponse* response)
 {
     ESP_LOGI(TAG, "received render response");
 
@@ -110,36 +112,32 @@ void handle_render_response(Matrx__RenderResponse* response)
     sprite_update_data(item->sprite, response->sprite_data.data, response->sprite_data.len);
 }
 
-void handle_pin_schedule_item(Matrx__PinScheduleItem* pin)
+void handle_pin_schedule_item(Kd__PinScheduleItem* pin)
 {
     ESP_LOGI(TAG, "received pin schedule item");
 }
 
-void handle_skip_schedule_item(Matrx__SkipScheduleItem* skip)
+void handle_skip_schedule_item(Kd__SkipScheduleItem* skip)
 {
     ESP_LOGI(TAG, "received skip schedule item");
 }
 
-void handle_message(Matrx__SocketMessage* message)
+void handle_message(Kd__KDMatrxMessage* message)
 {
     switch (message->message_case) {
-    case MATRX__SOCKET_MESSAGE__MESSAGE_SCHEDULE_RESPONSE:
+    case KD__KDMATRX_MESSAGE__MESSAGE_SCHEDULE_RESPONSE:
         ESP_LOGI(TAG, "received schedule response message");
         handle_schedule_response(message->schedule_response);
         break;
-    case MATRX__SOCKET_MESSAGE__MESSAGE_RENDER_RESPONSE:
+    case KD__KDMATRX_MESSAGE__MESSAGE_RENDER_RESPONSE:
         ESP_LOGI(TAG, "received render response message");
         handle_render_response(message->render_response);
         break;
-    case MATRX__SOCKET_MESSAGE__MESSAGE_RESTART:
-        ESP_LOGI(TAG, "received restart message");
-        esp_restart();
-        break;
-    case MATRX__SOCKET_MESSAGE__MESSAGE_PIN_SCHEDULE_ITEM:
+    case KD__KDMATRX_MESSAGE__MESSAGE_PIN_SCHEDULE_ITEM:
         ESP_LOGI(TAG, "received pin schedule item message");
         handle_pin_schedule_item(message->pin_schedule_item);
         break;
-    case MATRX__SOCKET_MESSAGE__MESSAGE_SKIP_SCHEDULE_ITEM:
+    case KD__KDMATRX_MESSAGE__MESSAGE_SKIP_SCHEDULE_ITEM:
         ESP_LOGI(TAG, "received skip schedule item message");
         handle_skip_schedule_item(message->skip_schedule_item);
         break;
@@ -147,7 +145,7 @@ void handle_message(Matrx__SocketMessage* message)
         break;
     }
 
-    matrx__socket_message__free_unpacked(message, NULL);
+    kd__kdmatrx_message__free_unpacked(message, NULL);
 }
 
 void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
@@ -206,7 +204,7 @@ void sockets_task(void* pvParameter)
                 continue;
             }
 
-            Matrx__SocketMessage* socket_message = matrx__socket_message__unpack(NULL, message.message_len, (uint8_t*)message.message);
+            Kd__KDMatrxMessage* socket_message = kd__kdmatrx_message__unpack(NULL, message.message_len, (uint8_t*)message.message);
             if (socket_message == NULL) {
                 ESP_LOGE(TAG, "failed to unpack socket message");
                 free(message.message);
@@ -242,16 +240,36 @@ void sockets_disconnect()
     esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
 }
 
-void send_socket_message(Matrx__SocketMessage* message)
+void send_kd_matrx_message(Kd__KDMatrxMessage* message)
 {
-    size_t len = matrx__socket_message__get_packed_size(message);
+    size_t len = kd__kdmatrx_message__get_packed_size(message);
     uint8_t* buffer = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (buffer == NULL) {
         ESP_LOGE(TAG, "failed to allocate message buffer");
         return;
     }
 
-    matrx__socket_message__pack(message, buffer);
+    kd__kdmatrx_message__pack(message, buffer);
+    ProcessableMessage_t p_message;
+    p_message.message = (char*)buffer;
+    p_message.message_len = len;
+    p_message.is_outbox = true;
+
+    if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGE(TAG, "failed to send message to queue");
+    }
+}
+
+void send_kd_global_message(Kd__KDGlobalMessage* message)
+{
+    size_t len = kd__kdglobal_message__get_packed_size(message);
+    uint8_t* buffer = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "failed to allocate message buffer");
+        return;
+    }
+
+    kd__kdglobal_message__pack(message, buffer);
     ProcessableMessage_t p_message;
     p_message.message = (char*)buffer;
     p_message.message_len = len;
@@ -263,37 +281,37 @@ void send_socket_message(Matrx__SocketMessage* message)
 }
 
 void request_render(uint8_t* schedule_item_uuid) {
-    Matrx__RequestRender request = MATRX__REQUEST_RENDER__INIT;
+    Kd__RequestRender request = KD__REQUEST_RENDER__INIT;
     request.uuid.data = schedule_item_uuid;
     request.uuid.len = UUID_SIZE_BYTES;
 
-    Matrx__SocketMessage message = MATRX__SOCKET_MESSAGE__INIT;
-    message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_REQUEST_RENDER;
+    Kd__KDMatrxMessage message = KD__KDMATRX_MESSAGE__INIT;
+    message.message_case = KD__KDMATRX_MESSAGE__MESSAGE_REQUEST_RENDER;
     message.request_render = &request;
 
-    send_socket_message(&message);
+    send_kd_matrx_message(&message);
 }
 
 void upload_coredump(uint8_t* core_dump, size_t core_dump_len) {
-    Matrx__UploadCoreDump upload = MATRX__UPLOAD_CORE_DUMP__INIT;
+    Kd__UploadCoreDump upload = KD__UPLOAD_CORE_DUMP__INIT;
     upload.core_dump.data = core_dump;
     upload.core_dump.len = core_dump_len;
 
-    Matrx__SocketMessage message = MATRX__SOCKET_MESSAGE__INIT;
-    message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
+    Kd__KDGlobalMessage message = KD__KDGLOBAL_MESSAGE__INIT;
+    message.message_case = KD__KDGLOBAL_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
     message.upload_core_dump = &upload;
 
-    send_socket_message(&message);
+    send_kd_global_message(&message);
 }
 
 void request_schedule() {
-    Matrx__RequestSchedule request = MATRX__REQUEST_SCHEDULE__INIT;
+    Kd__RequestSchedule request = KD__REQUEST_SCHEDULE__INIT;
 
-    Matrx__SocketMessage message = MATRX__SOCKET_MESSAGE__INIT;
-    message.message_case = MATRX__SOCKET_MESSAGE__MESSAGE_REQUEST_SCHEDULE;
+    Kd__KDMatrxMessage message = KD__KDMATRX_MESSAGE__INIT;
+    message.message_case = KD__KDMATRX_MESSAGE__MESSAGE_REQUEST_SCHEDULE;
     message.request_schedule = &request;
 
-    send_socket_message(&message);
+    send_kd_matrx_message(&message);
 }
 
 void attempt_coredump_upload() {
