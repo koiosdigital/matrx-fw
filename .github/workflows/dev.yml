@@ -48,11 +48,6 @@ jobs:
           echo "IDF_TARGET=${IDF_TARGET}" >> $GITHUB_ENV
           mkdir output
 
-      - name: Cache Docker images.
-        uses: AndreKurait/docker-cache@0.6.0
-        with:
-          key: docker-${{ runner.os }}-v5.4.1
-
       - name: idf build
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -60,26 +55,24 @@ jobs:
           extra_docker_args: -v ./output:/output
           target: ${{ env.IDF_TARGET }}
           command: |
+            export BUILD_VARIANT=${{ matrix.config }}
+
             apt update -y
             apt install -y protobuf-compiler protobuf-c-compiler
 
             #build
             idf.py build | tee build.log
 
-            # Extract flash_mode, flash_size, flash_freq, and binaries from build.log
             FLASH_LINE=$(grep "python -m esptool" build.log | grep -v "@flash_args" | tail -n 1)
 
             BINARY_INFO=$(grep -oP "^\S+\.bin binary size \S+ bytes" build.log | tail -n 1)
             BINARY_FILE=$(echo "$BINARY_INFO" | sed -n "s/^\(\S\+\.bin\).*/\1/p")
 
-            # Extract flash_mode, flash_size, flash_freq, and binaries
-            FLASH_MODE=$(echo "$FLASH_LINE" | sed -n "s/.*--flash_mode \([^ ]\+\) .*/\1/p")
-            FLASH_SIZE=$(echo "$FLASH_LINE" | sed -n "s/.*--flash_size \([^ ]\+\) .*/\1/p")
-            FLASH_FREQ=$(echo "$FLASH_LINE" | sed -n "s/.*--flash_freq \([^ ]\+\) .*/\1/p")
+            # Extract binaries
             BINARIES=$(echo "$FLASH_LINE" | sed -n "s/.*--flash_freq [^ ]\+ //p")
 
             #merge artifacts
-            esptool.py --chip ${{ env.IDF_TARGET }} merge_bin -o factory_flash.bin --flash_mode $FLASH_MODE --flash_size $FLASH_SIZE --flash_freq $FLASH_FREQ $BINARIES
+            esptool.py --chip ${{ env.IDF_TARGET }} merge_bin -o factory_flash.bin --flash_mode keep --flash_size keep --flash_freq keep $BINARIES
 
             #move artifacts
             mv factory_flash.bin /output/merged.bin
