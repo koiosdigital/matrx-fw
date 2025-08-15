@@ -24,8 +24,10 @@ void sprites_init() {
 }
 
 void sprite_free(RAMSprite_t* sprite) {
-    free(sprite->data);
-    free(sprite);
+    if (sprite != NULL) {
+        free(sprite->data);
+        free(sprite);
+    }
 }
 
 RAMSprite_t* sprite_allocate() {
@@ -42,24 +44,44 @@ RAMSprite_t* sprite_allocate() {
 }
 
 void sprite_update_data(RAMSprite_t* sprite, uint8_t* data, size_t len) {
+    if (sprite == NULL) {
+        ESP_LOGE(TAG, "invalid sprite pointer");
+        free(data); // Still free the input data
+        return;
+    }
+
+    if (data == NULL || len == 0) {
+        ESP_LOGE(TAG, "invalid sprite data");
+        free(sprite->data);
+        sprite->data = NULL;
+        sprite->len = 0;
+        free(data); // Still free the input data
+        return;
+    }
+
     free(sprite->data);
     sprite->data = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (sprite->data == NULL) {
         ESP_LOGE(TAG, "malloc failed: update sprite data");
+        sprite->len = 0;
+        free(data); // Still free the input data on allocation failure
         return;
     }
 
     memcpy(sprite->data, data, len);
     sprite->len = len;
-
-    free(data);
 }
 
 void show_fs_sprite(const char* filename) {
+    if (filename == NULL) {
+        ESP_LOGE(TAG, "invalid filename");
+        return;
+    }
+
     //open the file
     FILE* f = fopen(filename, "r");
     if (f == NULL) {
-        ESP_LOGE(TAG, "failed to open file");
+        ESP_LOGE(TAG, "failed to open file: %s", filename);
         return;
     }
 
@@ -67,6 +89,12 @@ void show_fs_sprite(const char* filename) {
     fseek(f, 0, SEEK_END);
     size_t len = ftell(f);
     fseek(f, 0, SEEK_SET);
+
+    if (len == 0) {
+        ESP_LOGE(TAG, "file is empty: %s", filename);
+        fclose(f);
+        return;
+    }
 
     free(fs_sprite_buf);
     fs_sprite_buf = NULL;
@@ -79,8 +107,15 @@ void show_fs_sprite(const char* filename) {
         return;
     }
 
-    fread(fs_sprite_buf, 1, len, f);
+    size_t bytes_read = fread(fs_sprite_buf, 1, len, f);
     fclose(f);
+
+    if (bytes_read != len) {
+        ESP_LOGE(TAG, "failed to read complete file: %s (read %d of %d bytes)", filename, bytes_read, len);
+        free(fs_sprite_buf);
+        fs_sprite_buf = NULL;
+        return;
+    }
 
     ESP_LOGI(TAG, "read %d bytes from %s", len, filename);
 
@@ -88,8 +123,20 @@ void show_fs_sprite(const char* filename) {
 }
 
 void show_sprite(RAMSprite_t* sprite) {
+    if (sprite == NULL || sprite->data == NULL || sprite->len == 0) {
+        ESP_LOGE(TAG, "invalid sprite data");
+        return;
+    }
+
     display_sprite(sprite->data, sprite->len);
 
+    // Only free fs_sprite_buf if we're not using it for this display
+    // RAM sprites don't use fs_sprite_buf, so it's safe to free here
+    free(fs_sprite_buf);
+    fs_sprite_buf = NULL;
+}
+
+void sprites_cleanup() {
     free(fs_sprite_buf);
     fs_sprite_buf = NULL;
 }

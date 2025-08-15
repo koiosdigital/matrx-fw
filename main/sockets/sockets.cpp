@@ -6,6 +6,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
 
 #include "kd_common.h"
 #include "display.h"
@@ -14,6 +15,7 @@
 
 #include "kd_matrx.pb-c.h"
 #include "kd_global.pb-c.h"
+#include "device-api.pb-c.h"
 
 #include "cJSON.h"
 #include <esp_partition.h>
@@ -24,6 +26,29 @@ TaskHandle_t xSocketsTask = NULL;
 
 QueueHandle_t xSocketsQueue = NULL;
 esp_websocket_client_handle_t client = NULL;
+
+#define UUID_SIZE_BYTES 16
+
+void send_socket_message(Kd__DeviceAPIMessage* message);
+
+// Helper function to send actual render request
+static void send_render_request_internal(uint8_t* schedule_item_uuid) {
+    ESP_LOGI(TAG, "sending render request for item");
+
+    Kd__RequestRender request = KD__REQUEST_RENDER__INIT;
+    request.uuid.data = schedule_item_uuid;
+    request.uuid.len = UUID_SIZE_BYTES;
+
+    Kd__KDMatrxMessage message = KD__KDMATRX_MESSAGE__INIT;
+    message.message_case = KD__KDMATRX_MESSAGE__MESSAGE_REQUEST_RENDER;
+    message.request_render = &request;
+
+    Kd__DeviceAPIMessage device_message = KD__DEVICE_APIMESSAGE__INIT;
+    device_message.message_case = KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE;
+    device_message.kd_matrx_message = &message;
+
+    send_socket_message(&device_message);
+}
 
 typedef struct ProcessableMessage_t {
     char* message;
@@ -39,21 +64,25 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "connected");
-        if (!scheduler_has_schedule()) {
-            show_fs_sprite("/fs/ready.webp");
-            request_schedule();
-        }
+        show_fs_sprite("/fs/ready.webp");
+        request_schedule();
         attempt_coredump_upload();
-        //scheduler_resume();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "disconnected");
-        //scheduler_pause();
+        if (dbuf) {
+            free(dbuf);
+            dbuf = NULL;
+        }
         show_fs_sprite("/fs/connect_cloud.webp");
         break;
     case WEBSOCKET_EVENT_DATA:
         if (data->payload_offset == 0) {
-            free(dbuf);
+            if (dbuf) {
+                free(dbuf);
+                dbuf = NULL;
+            }
+
             dbuf = (char*)heap_caps_calloc(data->payload_len + 1, sizeof(char), MALLOC_CAP_SPIRAM);
             if (dbuf == NULL) {
                 ESP_LOGE(TAG, "malloc failed: dbuf (%d)", data->payload_len);
@@ -65,7 +94,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
             memcpy(dbuf + data->payload_offset, data->data_ptr, data->data_len);
         }
 
-        if (data->payload_len + data->payload_offset >= data->data_len) {
+        if (data->payload_offset + data->data_len >= data->payload_len) {
             ProcessableMessage_t message;
             message.message = dbuf;
             message.message_len = data->payload_len;
@@ -75,6 +104,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
                 ESP_LOGE(TAG, "failed to send message to queue");
                 free(dbuf);
             }
+            dbuf = NULL; // Reset dbuf after processing
         }
 
         break;
@@ -86,29 +116,28 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
 void handle_schedule_response(Kd__ScheduleResponse* response)
 {
     if (response->n_schedule_items == 0) {
-        ESP_LOGI(TAG, "no schedule items");
         scheduler_clear();
         return;
     }
 
     scheduler_set_schedule(response);
+    scheduler_start();
 }
 
 void handle_render_response(Kd__RenderResponse* response)
 {
-    ESP_LOGI(TAG, "received render response");
-
-    if (response->render_error) {
-        ESP_LOGE(TAG, "^ it was a render error");
-        return;
-    }
-
     ScheduleItem_t* item = find_schedule_item(response->uuid.data);
     if (item == NULL) {
         ESP_LOGE(TAG, "failed to find schedule item");
         return;
     }
 
+    if (response->render_error == true) {
+        item->flags.skipped_server = true;
+        return;
+    }
+
+    item->flags.skipped_server = false;
     sprite_update_data(item->sprite, response->sprite_data.data, response->sprite_data.len);
 }
 
@@ -126,26 +155,22 @@ void handle_message(Kd__KDMatrxMessage* message)
 {
     switch (message->message_case) {
     case KD__KDMATRX_MESSAGE__MESSAGE_SCHEDULE_RESPONSE:
-        ESP_LOGI(TAG, "received schedule response message");
         handle_schedule_response(message->schedule_response);
         break;
     case KD__KDMATRX_MESSAGE__MESSAGE_RENDER_RESPONSE:
-        ESP_LOGI(TAG, "received render response message");
         handle_render_response(message->render_response);
         break;
     case KD__KDMATRX_MESSAGE__MESSAGE_PIN_SCHEDULE_ITEM:
-        ESP_LOGI(TAG, "received pin schedule item message");
         handle_pin_schedule_item(message->pin_schedule_item);
         break;
     case KD__KDMATRX_MESSAGE__MESSAGE_SKIP_SCHEDULE_ITEM:
-        ESP_LOGI(TAG, "received skip schedule item message");
         handle_skip_schedule_item(message->skip_schedule_item);
         break;
     default:
         break;
     }
 
-    kd__kdmatrx_message__free_unpacked(message, NULL);
+    // Don't free the message here - it's freed by the caller along with the parent device_message
 }
 
 void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
@@ -178,12 +203,13 @@ void sockets_task(void* pvParameter)
 
     esp_websocket_client_config_t websocket_cfg = {
         .uri = SOCKETS_URI,
-        .port = 443,
-        .client_cert = cert,
-        .client_cert_len = cert_len + 1,
-        .client_ds_data = ds_data_ctx,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .port = 9091,
+        //.client_cert = cert,
+        //.client_cert_len = cert_len + 1,
+        //.client_ds_data = ds_data_ctx,
+        //.crt_bundle_attach = esp_crt_bundle_attach,
         .reconnect_timeout_ms = 5000,
+        .ping_interval_sec = 5,
     };
 
     client = esp_websocket_client_init(&websocket_cfg);
@@ -193,31 +219,46 @@ void sockets_task(void* pvParameter)
 
     while (1)
     {
-        if (xQueueReceive(xSocketsQueue, &message, pdMS_TO_TICKS(5000)) == pdTRUE) {
+        if (xQueueReceive(xSocketsQueue, &message, portMAX_DELAY) == pdTRUE) {
             if (message.message == NULL) {
                 continue;
             }
 
             if (message.is_outbox) {
-                esp_websocket_client_send_bin(client, message.message, message.message_len, pdMS_TO_TICKS(1000));
+                if (esp_websocket_client_is_connected(client)) {
+                    esp_err_t ret = esp_websocket_client_send_bin(client, message.message, message.message_len, pdMS_TO_TICKS(10000));
+                    if (ret == -1) {
+                        ESP_LOGE(TAG, "failed to send websocket message: %s", esp_err_to_name(ret));
+                    }
+                }
+                else {
+                    ESP_LOGW(TAG, "websocket not connected, dropping outbox message");
+                }
                 free(message.message);
                 continue;
             }
 
-            Kd__KDMatrxMessage* socket_message = kd__kdmatrx_message__unpack(NULL, message.message_len, (uint8_t*)message.message);
-            if (socket_message == NULL) {
-                ESP_LOGE(TAG, "failed to unpack socket message");
+            Kd__DeviceAPIMessage* device_message = kd__device_apimessage__unpack(NULL, message.message_len, (uint8_t*)message.message);
+            if (device_message == NULL) {
+                ESP_LOGE(TAG, "failed to unpack device message");
                 free(message.message);
                 continue;
             }
-            handle_message(socket_message);
+            if (device_message->message_case != KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE) {
+                kd__device_apimessage__free_unpacked(device_message, NULL);
+                free(message.message);
+                continue;
+            }
+            handle_message(device_message->kd_matrx_message);
+            kd__device_apimessage__free_unpacked(device_message, NULL);
+            free(message.message);
         }
     }
 }
 
 void sockets_init()
 {
-    xSocketsQueue = xQueueCreate(10, sizeof(ProcessableMessage_t));
+    xSocketsQueue = xQueueCreate(20, sizeof(ProcessableMessage_t));
 
     xTaskCreatePinnedToCore(sockets_task, "sockets", 4096, NULL, 5, &xSocketsTask, 1);
 }
@@ -233,23 +274,29 @@ void sockets_connect()
 
 void sockets_disconnect()
 {
-    if (client != NULL) {
+    if (client == NULL) {
         return;
     }
 
     esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
 }
 
-void send_kd_matrx_message(Kd__KDMatrxMessage* message)
+void send_socket_message(Kd__DeviceAPIMessage* message)
 {
-    size_t len = kd__kdmatrx_message__get_packed_size(message);
+    // Check if websocket is connected before queuing
+    if (client == NULL || !esp_websocket_client_is_connected(client)) {
+        ESP_LOGW(TAG, "websocket not connected, dropping message");
+        return;
+    }
+
+    size_t len = kd__device_apimessage__get_packed_size(message);
     uint8_t* buffer = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (buffer == NULL) {
         ESP_LOGE(TAG, "failed to allocate message buffer");
         return;
     }
 
-    kd__kdmatrx_message__pack(message, buffer);
+    kd__device_apimessage__pack(message, buffer);
     ProcessableMessage_t p_message;
     p_message.message = (char*)buffer;
     p_message.message_len = len;
@@ -257,39 +304,15 @@ void send_kd_matrx_message(Kd__KDMatrxMessage* message)
 
     if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
         ESP_LOGE(TAG, "failed to send message to queue");
-    }
-}
-
-void send_kd_global_message(Kd__KDGlobalMessage* message)
-{
-    size_t len = kd__kdglobal_message__get_packed_size(message);
-    uint8_t* buffer = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "failed to allocate message buffer");
+        free(buffer);  // Free buffer if queue send fails
         return;
     }
 
-    kd__kdglobal_message__pack(message, buffer);
-    ProcessableMessage_t p_message;
-    p_message.message = (char*)buffer;
-    p_message.message_len = len;
-    p_message.is_outbox = true;
-
-    if (xQueueSend(xSocketsQueue, &p_message, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGE(TAG, "failed to send message to queue");
-    }
+    ESP_LOGI(TAG, "sent message to queue: %.*s", (int)len, p_message.message);
 }
 
 void request_render(uint8_t* schedule_item_uuid) {
-    Kd__RequestRender request = KD__REQUEST_RENDER__INIT;
-    request.uuid.data = schedule_item_uuid;
-    request.uuid.len = UUID_SIZE_BYTES;
-
-    Kd__KDMatrxMessage message = KD__KDMATRX_MESSAGE__INIT;
-    message.message_case = KD__KDMATRX_MESSAGE__MESSAGE_REQUEST_RENDER;
-    message.request_render = &request;
-
-    send_kd_matrx_message(&message);
+    send_render_request_internal(schedule_item_uuid);
 }
 
 void upload_coredump(uint8_t* core_dump, size_t core_dump_len) {
@@ -301,7 +324,11 @@ void upload_coredump(uint8_t* core_dump, size_t core_dump_len) {
     message.message_case = KD__KDGLOBAL_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
     message.upload_core_dump = &upload;
 
-    send_kd_global_message(&message);
+    Kd__DeviceAPIMessage device_message = KD__DEVICE_APIMESSAGE__INIT;
+    device_message.message_case = KD__DEVICE_APIMESSAGE__MESSAGE_KD_GLOBAL_MESSAGE;
+    device_message.kd_global_message = &message;
+
+    send_socket_message(&device_message);
 }
 
 void request_schedule() {
@@ -311,7 +338,11 @@ void request_schedule() {
     message.message_case = KD__KDMATRX_MESSAGE__MESSAGE_REQUEST_SCHEDULE;
     message.request_schedule = &request;
 
-    send_kd_matrx_message(&message);
+    Kd__DeviceAPIMessage device_message = KD__DEVICE_APIMESSAGE__INIT;
+    device_message.message_case = KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE;
+    device_message.kd_matrx_message = &message;
+
+    send_socket_message(&device_message);
 }
 
 void attempt_coredump_upload() {
@@ -333,7 +364,7 @@ void attempt_coredump_upload() {
     uint8_t* encoded_data = 0;
     bool is_erased = true;
 
-    uint8_t* core_dump_data = (uint8_t*)malloc(core_dump_size + 1); // used as return, so freed in calling function
+    uint8_t* core_dump_data = (uint8_t*)heap_caps_malloc(core_dump_size + 1, MALLOC_CAP_SPIRAM); // used as return, so freed in calling function
     if (!core_dump_data)
     {
         ESP_LOGE(TAG, "Failed to allocate memory for core dump");

@@ -47,18 +47,39 @@ void destroy_decoder() {
     }
 }
 
-void start_decoder() {
+esp_err_t start_decoder() {
     destroy_decoder();
 
     if (webp_data.bytes == NULL || webp_data.size == 0) {
         ESP_LOGE(TAG, "no sprite data");
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
 
-    dec = WebPAnimDecoderNew(&webp_data, NULL);
-    WebPAnimDecoderGetInfo(dec, &anim_info);
+    if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
+        dec = WebPAnimDecoderNew(&webp_data, NULL);
+        if (dec == NULL) {
+            ESP_LOGE(TAG, "failed to create WebP decoder");
+            xSemaphoreGive(xWebPSemaphore);
+            return ESP_FAIL;
+        }
+
+        if (!WebPAnimDecoderGetInfo(dec, &anim_info)) {
+            ESP_LOGE(TAG, "failed to get WebP animation info");
+            WebPAnimDecoderDelete(dec);
+            dec = NULL;
+            xSemaphoreGive(xWebPSemaphore);
+            return ESP_FAIL;
+        }
+
+        xSemaphoreGive(xWebPSemaphore);
+    }
+    else {
+        ESP_LOGE(TAG, "failed to take semaphore for decoder start");
+        return ESP_ERR_TIMEOUT;
+    }
 
     xTaskNotify(xDecoderTask, WebPTaskNotification_t::WEBP_START, eSetValueWithOverwrite);
+    return ESP_OK;
 }
 
 void decoder_task(void* pvParameter) {
@@ -81,6 +102,7 @@ void decoder_task(void* pvParameter) {
         if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
             //check if someone's destroyed our decoder
             if (dec == NULL) {
+                xSemaphoreGive(xWebPSemaphore);
                 active = false;
                 continue;
             }
@@ -97,10 +119,30 @@ void decoder_task(void* pvParameter) {
             int timestamp;
 
             if (!WebPAnimDecoderGetNext(dec, &frame_buffer, &timestamp)) {
-                ESP_LOGE(TAG, "error getting next frame");
-                WebPAnimDecoderReset(dec);
-                anim_start_tick = 0;
+                ESP_LOGE(TAG, "error getting next frame, restarting decoder");
+                // Destroy and recreate the decoder on error
+                WebPAnimDecoderDelete(dec);
+                dec = NULL;
                 xSemaphoreGive(xWebPSemaphore);
+
+                // Restart the decoder with limited retries
+                esp_err_t err;
+                int retry_count = 0;
+                const int max_retries = 5;
+
+                do {
+                    err = start_decoder();
+                    if (err != ESP_OK) {
+                        retry_count++;
+                        ESP_LOGW(TAG, "Failed to restart decoder, retry %d/%d", retry_count, max_retries);
+                        vTaskDelay(pdMS_TO_TICKS(200)); // Wait 200ms before retry
+                    }
+                } while (err != ESP_OK && retry_count < max_retries);
+
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to restart decoder after %d retries, stopping", max_retries);
+                    active = false;
+                }
                 continue;
             }
 
@@ -130,6 +172,12 @@ void decoder_task(void* pvParameter) {
             //wait to display frame if necessary
             int delay = timestamp - last_timestamp;
             last_timestamp = timestamp;
+
+            // If there's only 1 frame, ensure a 1-second delay as fallback to prevent task starvation
+            if (anim_info.frame_count == 1 && delay <= 0) {
+                delay = 1000; // 1 second in milliseconds
+            }
+
             if (delay > 0) {
                 xTaskDelayUntil(&anim_start_tick, pdMS_TO_TICKS(delay));
             }
@@ -167,6 +215,10 @@ void prov_display_qr() {
         .qrcode_ecc_level = ESP_QRCODE_ECC_MED,
     };
 
+    // Clean up any existing QR buffer
+    free(qr_display_buffer);
+    qr_display_buffer = NULL;
+
     qr_display_buffer = (uint8_t*)heap_caps_calloc(get_display_buffer_size(), sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (qr_display_buffer == NULL) {
         ESP_LOGE(TAG, "malloc failed: display buffer");
@@ -177,6 +229,8 @@ void prov_display_qr() {
     esp_err_t err = esp_qrcode_generate(&qr_config, kd_common_get_provisioning_qr_payload());
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "QR code generation failed");
+        free(qr_display_buffer);
+        qr_display_buffer = NULL;
     }
 }
 
@@ -235,8 +289,7 @@ void display_init() {
     dma_display->fillScreenRGB888(0, 0, 0);
 #endif
 
-    xWebPSemaphore = xSemaphoreCreateBinary();
-    xSemaphoreGive(xWebPSemaphore);
+    xWebPSemaphore = xSemaphoreCreateMutex();
 
     xTaskCreatePinnedToCore(decoder_task, "decoder", 4096, NULL, 3, &xDecoderTask, 1);
 
@@ -250,12 +303,34 @@ void display_init() {
 }
 
 esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
+    if (p_sprite_buf == NULL || sprite_buf_len == 0) {
+        ESP_LOGE(TAG, "invalid sprite buffer");
+        return ESP_ERR_INVALID_ARG;
+    }
+
     destroy_decoder();
 
     webp_data.bytes = p_sprite_buf;
     webp_data.size = sprite_buf_len;
 
-    start_decoder();
+    // Start decoder with limited retries
+    esp_err_t err;
+    int retry_count = 0;
+    const int max_retries = 3;
+
+    do {
+        err = start_decoder();
+        if (err != ESP_OK) {
+            retry_count++;
+            ESP_LOGW(TAG, "Failed to start decoder, retry %d/%d", retry_count, max_retries);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+    } while (err != ESP_OK && retry_count < max_retries);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start decoder after %d retries", max_retries);
+        return err;
+    }
 
     return ESP_OK;
 }
