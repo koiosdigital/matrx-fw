@@ -2,6 +2,8 @@
 
 #include "esp_log.h"
 #include <esp_littlefs.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "display.h"
 
@@ -25,6 +27,14 @@ void sprites_init() {
 
 void sprite_free(RAMSprite_t* sprite) {
     if (sprite != NULL) {
+        // Take mutex before freeing to ensure no operations are in progress
+        if (sprite->mutex != NULL) {
+            xSemaphoreTake(sprite->mutex, portMAX_DELAY);
+            // Delete the mutex
+            vSemaphoreDelete(sprite->mutex);
+            sprite->mutex = NULL;
+        }
+
         free(sprite->data);
         free(sprite);
     }
@@ -40,6 +50,14 @@ RAMSprite_t* sprite_allocate() {
     sprite->data = NULL;
     sprite->len = 0;
 
+    // Create mutex for thread safety
+    sprite->mutex = xSemaphoreCreateMutex();
+    if (sprite->mutex == NULL) {
+        ESP_LOGE(TAG, "failed to create sprite mutex");
+        free(sprite);
+        return NULL;
+    }
+
     return sprite;
 }
 
@@ -50,12 +68,26 @@ void sprite_update_data(RAMSprite_t* sprite, uint8_t* data, size_t len) {
         return;
     }
 
+    if (sprite->mutex == NULL) {
+        ESP_LOGE(TAG, "sprite mutex is null");
+        free(data); // Still free the input data
+        return;
+    }
+
+    // Take mutex to ensure exclusive access during data update
+    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(TAG, "failed to take sprite mutex");
+        free(data); // Still free the input data
+        return;
+    }
+
     if (data == NULL || len == 0) {
         ESP_LOGE(TAG, "invalid sprite data");
         free(sprite->data);
         sprite->data = NULL;
         sprite->len = 0;
         free(data); // Still free the input data
+        xSemaphoreGive(sprite->mutex);
         return;
     }
 
@@ -65,11 +97,15 @@ void sprite_update_data(RAMSprite_t* sprite, uint8_t* data, size_t len) {
         ESP_LOGE(TAG, "malloc failed: update sprite data");
         sprite->len = 0;
         free(data); // Still free the input data on allocation failure
+        xSemaphoreGive(sprite->mutex);
         return;
     }
 
     memcpy(sprite->data, data, len);
     sprite->len = len;
+
+    // Release mutex after data update is complete
+    xSemaphoreGive(sprite->mutex);
 }
 
 void show_fs_sprite(const char* filename) {
@@ -123,20 +159,114 @@ void show_fs_sprite(const char* filename) {
 }
 
 void show_sprite(RAMSprite_t* sprite) {
-    if (sprite == NULL || sprite->data == NULL || sprite->len == 0) {
-        ESP_LOGE(TAG, "invalid sprite data");
+    if (sprite == NULL) {
+        ESP_LOGE(TAG, "invalid sprite pointer");
         return;
     }
 
-    display_sprite(sprite->data, sprite->len);
+    if (sprite->mutex == NULL) {
+        ESP_LOGE(TAG, "sprite mutex is null");
+        return;
+    }
 
-    // Only free fs_sprite_buf if we're not using it for this display
-    // RAM sprites don't use fs_sprite_buf, so it's safe to free here
+    // Take mutex to ensure sprite data doesn't change during display
+    // This will block until any update_data operation is complete
+    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(TAG, "failed to take sprite mutex for display");
+        return;
+    }
+
+    // Check data validity while holding the mutex
+    if (sprite->data == NULL || sprite->len == 0) {
+        ESP_LOGE(TAG, "invalid sprite data");
+        xSemaphoreGive(sprite->mutex);
+        return;
+    }
+
+    // Free any existing buffer
     free(fs_sprite_buf);
     fs_sprite_buf = NULL;
+
+    // Create a buffer copy of the sprite data to prevent issues if the original data changes
+    fs_sprite_buf = (uint8_t*)heap_caps_calloc(sprite->len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
+    if (fs_sprite_buf == NULL) {
+        ESP_LOGE(TAG, "malloc failed: fs_sprite_buf for RAM sprite");
+        xSemaphoreGive(sprite->mutex);
+        return;
+    }
+
+    memcpy(fs_sprite_buf, sprite->data, sprite->len);
+    size_t sprite_len = sprite->len;
+
+    // Release mutex after copying data
+    xSemaphoreGive(sprite->mutex);
+
+    // Display the copied data (no need to hold mutex during display)
+    display_sprite(fs_sprite_buf, sprite_len);
 }
 
 void sprites_cleanup() {
     free(fs_sprite_buf);
     fs_sprite_buf = NULL;
+}
+
+// Thread-safe function to get a copy of sprite data
+bool sprite_get_data_copy(RAMSprite_t* sprite, uint8_t** data_copy, size_t* len) {
+    if (sprite == NULL || data_copy == NULL || len == NULL) {
+        ESP_LOGE(TAG, "invalid parameters for sprite_get_data_copy");
+        return false;
+    }
+
+    if (sprite->mutex == NULL) {
+        ESP_LOGE(TAG, "sprite mutex is null");
+        return false;
+    }
+
+    // Take mutex to ensure consistent data read
+    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(TAG, "failed to take sprite mutex for data copy");
+        return false;
+    }
+
+    if (sprite->data == NULL || sprite->len == 0) {
+        *data_copy = NULL;
+        *len = 0;
+        xSemaphoreGive(sprite->mutex);
+        return true; // Valid state, just empty
+    }
+
+    // Allocate copy buffer
+    *data_copy = (uint8_t*)heap_caps_malloc(sprite->len, MALLOC_CAP_SPIRAM);
+    if (*data_copy == NULL) {
+        ESP_LOGE(TAG, "failed to allocate memory for sprite data copy");
+        *len = 0;
+        xSemaphoreGive(sprite->mutex);
+        return false;
+    }
+
+    // Copy data
+    memcpy(*data_copy, sprite->data, sprite->len);
+    *len = sprite->len;
+
+    xSemaphoreGive(sprite->mutex);
+    return true;
+}
+
+// Thread-safe function to get sprite length
+size_t sprite_get_length(RAMSprite_t* sprite) {
+    if (sprite == NULL || sprite->mutex == NULL) {
+        ESP_LOGE(TAG, "invalid sprite or mutex for sprite_get_length");
+        return 0;
+    }
+
+    // Take mutex to ensure consistent read
+    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(TAG, "failed to take sprite mutex for length read");
+        return 0;
+    }
+
+    size_t len = sprite->len;
+    xSemaphoreGive(sprite->mutex);
+
+    return len;
 }

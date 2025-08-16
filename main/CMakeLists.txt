@@ -4,7 +4,7 @@ file(GLOB_RECURSE NESTED_SRC
 
 idf_component_register(
     SRCS ${NESTED_SRC}
-    INCLUDE_DIRS "." "hw_defs" "display" "sockets" "sprites" "scheduler"
+    INCLUDE_DIRS "." "hw_defs" "display" "sockets" "sprites" "scheduler" "daughterboard"
     REQUIRES esp_wifi heap ESP32-HUB75-MatrixPanel-DMA libwebp json qrcode bootloader_support protobufs kd_common esp_http_client wifi_provisioning
 )
 

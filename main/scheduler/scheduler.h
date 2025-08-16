@@ -37,6 +37,9 @@ void scheduler_skip_current_schedule_item();
 void scheduler_pin_schedule_item(uint8_t* schedule_item_uuid);
 void scheduler_pin_current_schedule_item();
 
+void scheduler_goto_next_item();
+void scheduler_goto_previous_item();
+
 void scheduler_clear();
 void scheduler_stop();
 void scheduler_start();

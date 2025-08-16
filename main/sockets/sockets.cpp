@@ -7,6 +7,8 @@
 #include "esp_http_client.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "kd_common.h"
 #include "display.h"
@@ -28,26 +30,131 @@ QueueHandle_t xSocketsQueue = NULL;
 esp_websocket_client_handle_t client = NULL;
 
 #define UUID_SIZE_BYTES 16
+#define RENDER_REQUEST_TIMEOUT_MS 5000
+#define MAX_PENDING_RENDER_REQUESTS 10
+
+// Structure to track pending render requests
+typedef struct PendingRenderRequest_t {
+    uint8_t uuid[UUID_SIZE_BYTES];
+    int64_t timestamp_ms;
+    bool in_use;
+} PendingRenderRequest_t;
+
+// Array to track pending render requests
+static PendingRenderRequest_t pending_render_requests[MAX_PENDING_RENDER_REQUESTS] = { 0 };
+static SemaphoreHandle_t render_requests_mutex = NULL;
+
+// Connection watchdog - track last activity to detect stale connections
+static int64_t last_websocket_activity_ms = 0;
+#define CONNECTION_WATCHDOG_TIMEOUT_MS 60000  // 60 seconds of no activity triggers reconnect
+
+// Task notifications for socket operations
+typedef enum SocketTaskNotification_t {
+    SOCKET_TASK_REINIT = 1,
+    SOCKET_TASK_RECONNECT = 2,
+} SocketTaskNotification_t;
 
 void send_socket_message(Kd__DeviceAPIMessage* message);
 
-// Helper function to send actual render request
-static void send_render_request_internal(uint8_t* schedule_item_uuid) {
-    ESP_LOGI(TAG, "sending render request for item");
+// Forward declarations for internal functions
+static esp_err_t socket_init();
+static void socket_deinit();
 
-    Kd__RequestRender request = KD__REQUEST_RENDER__INIT;
-    request.uuid.data = schedule_item_uuid;
-    request.uuid.len = UUID_SIZE_BYTES;
+// Helper functions for tracking render requests
+static void cleanup_expired_render_requests() {
+    if (render_requests_mutex == NULL) return;
 
-    Kd__KDMatrxMessage message = KD__KDMATRX_MESSAGE__INIT;
-    message.message_case = KD__KDMATRX_MESSAGE__MESSAGE_REQUEST_RENDER;
-    message.request_render = &request;
+    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
 
-    Kd__DeviceAPIMessage device_message = KD__DEVICE_APIMESSAGE__INIT;
-    device_message.message_case = KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE;
-    device_message.kd_matrx_message = &message;
+    int64_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
 
-    send_socket_message(&device_message);
+    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
+        if (pending_render_requests[i].in_use) {
+            if (current_time - pending_render_requests[i].timestamp_ms >= RENDER_REQUEST_TIMEOUT_MS) {
+                ESP_LOGW(TAG, "Render request timeout for UUID, clearing");
+                pending_render_requests[i].in_use = false;
+                memset(pending_render_requests[i].uuid, 0, UUID_SIZE_BYTES);
+            }
+        }
+    }
+
+    xSemaphoreGive(render_requests_mutex);
+}
+
+static bool is_render_request_pending(uint8_t* uuid) {
+    if (render_requests_mutex == NULL || uuid == NULL) return false;
+
+    cleanup_expired_render_requests();
+
+    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
+
+    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
+        if (pending_render_requests[i].in_use &&
+            memcmp(pending_render_requests[i].uuid, uuid, UUID_SIZE_BYTES) == 0) {
+            xSemaphoreGive(render_requests_mutex);
+            return true;
+        }
+    }
+
+    xSemaphoreGive(render_requests_mutex);
+    return false;
+}
+
+static bool add_pending_render_request(uint8_t* uuid) {
+    if (render_requests_mutex == NULL || uuid == NULL) return false;
+
+    cleanup_expired_render_requests();
+
+    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
+
+    // Find an empty slot
+    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
+        if (!pending_render_requests[i].in_use) {
+            memcpy(pending_render_requests[i].uuid, uuid, UUID_SIZE_BYTES);
+            pending_render_requests[i].timestamp_ms = esp_timer_get_time() / 1000;
+            pending_render_requests[i].in_use = true;
+
+            xSemaphoreGive(render_requests_mutex);
+            ESP_LOGD(TAG, "Added pending render request for UUID");
+            return true;
+        }
+    }
+
+    xSemaphoreGive(render_requests_mutex);
+    ESP_LOGW(TAG, "No space for new render request, max pending requests reached");
+    return false;
+}
+
+static void remove_pending_render_request(uint8_t* uuid) {
+    if (render_requests_mutex == NULL || uuid == NULL) return;
+
+    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
+
+    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
+        if (pending_render_requests[i].in_use &&
+            memcmp(pending_render_requests[i].uuid, uuid, UUID_SIZE_BYTES) == 0) {
+            pending_render_requests[i].in_use = false;
+            memset(pending_render_requests[i].uuid, 0, UUID_SIZE_BYTES);
+            ESP_LOGD(TAG, "Removed pending render request for UUID");
+            break;
+        }
+    }
+
+    xSemaphoreGive(render_requests_mutex);
+}
+
+static void clear_all_pending_render_requests() {
+    if (render_requests_mutex == NULL) return;
+
+    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
+
+    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
+        pending_render_requests[i].in_use = false;
+        memset(pending_render_requests[i].uuid, 0, UUID_SIZE_BYTES);
+    }
+
+    xSemaphoreGive(render_requests_mutex);
+    ESP_LOGI(TAG, "Cleared all pending render requests");
 }
 
 typedef struct ProcessableMessage_t {
@@ -63,20 +170,39 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
 
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "connected");
+        last_websocket_activity_ms = esp_timer_get_time() / 1000; // Update activity timestamp
         show_fs_sprite("/fs/ready.webp");
         request_schedule();
         attempt_coredump_upload();
         break;
+
     case WEBSOCKET_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "disconnected");
         if (dbuf) {
             free(dbuf);
             dbuf = NULL;
         }
+        // Clear all pending render requests since websocket is disconnected
+        clear_all_pending_render_requests();
         show_fs_sprite("/fs/connect_cloud.webp");
+        if (xSocketsTask != NULL) {
+            xTaskNotify(xSocketsTask, SOCKET_TASK_RECONNECT, eSetValueWithOverwrite);
+        }
         break;
+
+    case WEBSOCKET_EVENT_ERROR:
+        if (dbuf) {
+            free(dbuf);
+            dbuf = NULL;
+        }
+        clear_all_pending_render_requests();
+        if (xSocketsTask != NULL) {
+            xTaskNotify(xSocketsTask, SOCKET_TASK_REINIT, eSetValueWithOverwrite);
+        }
+        break;
+
     case WEBSOCKET_EVENT_DATA:
+        last_websocket_activity_ms = esp_timer_get_time() / 1000; // Update activity timestamp
+
         if (data->payload_offset == 0) {
             if (dbuf) {
                 free(dbuf);
@@ -106,11 +232,112 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
             }
             dbuf = NULL; // Reset dbuf after processing
         }
-
         break;
+
     default:
+        ESP_LOGD(TAG, "Unhandled websocket event: %ld", event_id);
         break;
     }
+}
+
+// Websocket initialization function
+static esp_err_t socket_init() {
+    ESP_LOGI(TAG, "Initializing websocket client");
+
+    if (client != NULL) {
+        ESP_LOGW(TAG, "Client already initialized, deinitializing first");
+        socket_deinit();
+    }
+
+    esp_ds_data_ctx_t* ds_data_ctx = kd_common_crypto_get_ctx();
+    char* cert = (char*)calloc(4096, sizeof(char));
+    if (cert == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate certificate buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t cert_len = 4096;
+    esp_err_t ret = kd_common_get_device_cert(cert, &cert_len);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get device certificate: %s", esp_err_to_name(ret));
+        free(cert);
+        return ret;
+    }
+
+    esp_websocket_client_config_t websocket_cfg = {
+        .uri = SOCKETS_URI,
+        .port = 9091,
+        .reconnect_timeout_ms = 1000,      // Faster initial reconnect attempts  
+        .network_timeout_ms = 5000,        // Shorter timeout to fail fast and retry
+        .ping_interval_sec = 10,           // Keep connection alive with pings
+        //.client_cert = cert,
+        //.client_cert_len = cert_len + 1,
+        //.client_ds_data = ds_data_ctx,
+        //.crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    client = esp_websocket_client_init(&websocket_cfg);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize websocket client");
+        free(cert);
+        return ESP_FAIL;
+    }
+
+    ret = esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void*)client);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register websocket events: %s", esp_err_to_name(ret));
+        esp_websocket_client_destroy(client);
+        client = NULL;
+        free(cert);
+        return ret;
+    }
+
+    // Free the certificate buffer as it's no longer needed after websocket init
+    free(cert);
+
+    ESP_LOGI(TAG, "Websocket client initialized successfully");
+    return ESP_OK;
+}
+
+// Websocket deinitialization function
+static void socket_deinit() {
+    ESP_LOGI(TAG, "Deinitializing websocket client");
+
+    if (client != NULL) {
+        // Stop the client first
+        esp_websocket_client_stop(client);
+
+        // Destroy the client
+        esp_websocket_client_destroy(client);
+        client = NULL;
+
+        // Clear all pending render requests
+        clear_all_pending_render_requests();
+
+        ESP_LOGI(TAG, "Websocket client deinitialized");
+    }
+}
+
+// Helper function to send actual render request
+static void send_render_request_internal(uint8_t* schedule_item_uuid) {
+    ESP_LOGI(TAG, "sending render request for item");
+
+    Kd__RequestRender request = KD__REQUEST_RENDER__INIT;
+    request.uuid.data = schedule_item_uuid;
+    request.uuid.len = UUID_SIZE_BYTES;
+
+    request.width = CONFIG_MATRIX_WIDTH;
+    request.height = CONFIG_MATRIX_HEIGHT;
+
+    Kd__KDMatrxMessage message = KD__KDMATRX_MESSAGE__INIT;
+    message.message_case = KD__KDMATRX_MESSAGE__MESSAGE_REQUEST_RENDER;
+    message.request_render = &request;
+
+    Kd__DeviceAPIMessage device_message = KD__DEVICE_APIMESSAGE__INIT;
+    device_message.message_case = KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE;
+    device_message.kd_matrx_message = &message;
+
+    send_socket_message(&device_message);
 }
 
 void handle_schedule_response(Kd__ScheduleResponse* response)
@@ -126,6 +353,9 @@ void handle_schedule_response(Kd__ScheduleResponse* response)
 
 void handle_render_response(Kd__RenderResponse* response)
 {
+    // Remove from pending requests tracking as we received a response
+    remove_pending_render_request(response->uuid.data);
+
     ScheduleItem_t* item = find_schedule_item(response->uuid.data);
     if (item == NULL) {
         ESP_LOGE(TAG, "failed to find schedule item");
@@ -184,6 +414,11 @@ void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, voi
 
 void sockets_task(void* pvParameter)
 {
+    uint32_t reconnect_delay_ms = 1000; // Start with 1 second
+    const uint32_t max_reconnect_delay_ms = 30000; // Maximum 30 seconds
+    uint32_t init_retry_count = 0;
+
+    // Wait for crypto to be ready
     while (1) {
         if (kd_common_crypto_get_state() != CryptoState_t::CRYPTO_STATE_VALID_CERT) {
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -195,31 +430,92 @@ void sockets_task(void* pvParameter)
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL);
 
-    esp_ds_data_ctx_t* ds_data_ctx = kd_common_crypto_get_ctx();
-    char* cert = (char*)calloc(4096, sizeof(char));
-    size_t cert_len = 4096;
+    // Initialize activity timestamp
+    last_websocket_activity_ms = esp_timer_get_time() / 1000;
 
-    kd_common_get_device_cert(cert, &cert_len);
+    // Initialize websocket client with infinite retry logic - NEVER GIVE UP!
+    while (1) {
+        esp_err_t ret = socket_init();
+        if (ret == ESP_OK) {
+            reconnect_delay_ms = 1000; // Reset delay on success
+            break;
+        }
+        else {
+            init_retry_count++;
+            vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
 
-    esp_websocket_client_config_t websocket_cfg = {
-        .uri = SOCKETS_URI,
-        .port = 9091,
-        //.client_cert = cert,
-        //.client_cert_len = cert_len + 1,
-        //.client_ds_data = ds_data_ctx,
-        //.crt_bundle_attach = esp_crt_bundle_attach,
-        .reconnect_timeout_ms = 5000,
-        .ping_interval_sec = 5,
-    };
-
-    client = esp_websocket_client_init(&websocket_cfg);
-    esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void*)client);
+            // Exponential backoff with cap
+            reconnect_delay_ms = (reconnect_delay_ms * 2 > max_reconnect_delay_ms) ?
+                max_reconnect_delay_ms : reconnect_delay_ms * 2;
+        }
+    }
 
     ProcessableMessage_t message;
+    TickType_t last_cleanup_time = xTaskGetTickCount();
 
     while (1)
     {
-        if (xQueueReceive(xSocketsQueue, &message, portMAX_DELAY) == pdTRUE) {
+        // Check for task notifications (reinit/reconnect commands)
+        uint32_t notification_value;
+        if (xTaskNotifyWait(0, ULONG_MAX, &notification_value, pdMS_TO_TICKS(100)) == pdTRUE) {
+            SocketTaskNotification_t notification = (SocketTaskNotification_t)notification_value;
+
+            switch (notification) {
+            case SOCKET_TASK_REINIT:
+                socket_deinit();
+                vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
+                while (1) {
+                    esp_err_t ret = socket_init();
+                    if (ret == ESP_OK) {
+                        reconnect_delay_ms = 1000; // Reset delay on success
+                        break;
+                    }
+                    else {
+                        ESP_LOGE(TAG, "Failed to reinitialize websocket: %s", esp_err_to_name(ret));
+                        vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
+
+                        // Exponential backoff for next attempt
+                        reconnect_delay_ms = (reconnect_delay_ms * 2 > max_reconnect_delay_ms) ?
+                            max_reconnect_delay_ms : reconnect_delay_ms * 2;
+                    }
+                }
+                break;
+
+            case SOCKET_TASK_RECONNECT:
+                if (client != NULL) {
+                    sockets_connect();
+                    reconnect_delay_ms = 1000; // Reset delay on reconnect attempt
+                }
+                else {
+                    ESP_LOGW(TAG, "Cannot reconnect, client not initialized, reinitializing");
+                    // Keep trying to reinitialize until success - NEVER GIVE UP!
+                    while (1) {
+                        esp_err_t ret = socket_init();
+                        if (ret == ESP_OK) {
+                            sockets_connect();
+                            reconnect_delay_ms = 1000; // Reset delay on success
+                            break;
+                        }
+                        else {
+                            ESP_LOGE(TAG, "Failed to initialize for reconnect: %s", esp_err_to_name(ret));
+                            vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
+
+                            // Exponential backoff
+                            reconnect_delay_ms = (reconnect_delay_ms * 2 > max_reconnect_delay_ms) ?
+                                max_reconnect_delay_ms : reconnect_delay_ms * 2;
+                        }
+                    }
+                }
+                break;
+
+            default:
+                ESP_LOGW(TAG, "Unknown socket task notification: %lu", notification_value);
+                break;
+            }
+        }
+
+        // Use timeout to allow periodic cleanup of expired render requests
+        if (xQueueReceive(xSocketsQueue, &message, pdMS_TO_TICKS(900)) == pdTRUE) {
             if (message.message == NULL) {
                 continue;
             }
@@ -253,32 +549,117 @@ void sockets_task(void* pvParameter)
             kd__device_apimessage__free_unpacked(device_message, NULL);
             free(message.message);
         }
+
+        // Periodic cleanup and aggressive connection monitoring (every 5 seconds)
+        TickType_t current_time = xTaskGetTickCount();
+        if (current_time - last_cleanup_time >= pdMS_TO_TICKS(5000)) {
+            cleanup_expired_render_requests();
+            last_cleanup_time = current_time;
+
+            int64_t current_time_ms = esp_timer_get_time() / 1000;
+
+            // NEVER GIVE UP - Proactive connection monitoring and recovery!
+            if (client != NULL && esp_websocket_client_is_connected(client)) {
+                // Check for connection watchdog timeout
+                if (last_websocket_activity_ms > 0 &&
+                    (current_time_ms - last_websocket_activity_ms) > CONNECTION_WATCHDOG_TIMEOUT_MS) {
+                    xTaskNotify(xSocketsTask, SOCKET_TASK_RECONNECT, eSetValueWithOverwrite);
+                }
+            }
+            else if (client != NULL && !esp_websocket_client_is_connected(client)) {
+                sockets_connect();
+            }
+            else if (client == NULL) {
+                xTaskNotify(xSocketsTask, SOCKET_TASK_REINIT, eSetValueWithOverwrite);
+            }
+        }
     }
 }
 
 void sockets_init()
 {
-    xSocketsQueue = xQueueCreate(20, sizeof(ProcessableMessage_t));
+    ESP_LOGI(TAG, "Initializing sockets module");
 
-    xTaskCreatePinnedToCore(sockets_task, "sockets", 4096, NULL, 5, &xSocketsTask, 1);
+    xSocketsQueue = xQueueCreate(20, sizeof(ProcessableMessage_t));
+    if (xSocketsQueue == NULL) {
+        ESP_LOGE(TAG, "Failed to create sockets queue");
+        return;
+    }
+
+    // Initialize mutex for tracking render requests
+    render_requests_mutex = xSemaphoreCreateMutex();
+    if (render_requests_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create render requests mutex");
+        return;
+    }
+
+    BaseType_t ret = xTaskCreatePinnedToCore(sockets_task, "sockets", 8192, NULL, 5, &xSocketsTask, 1);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create sockets task");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Sockets module initialized successfully");
+}
+
+void sockets_deinit()
+{
+    ESP_LOGI(TAG, "Deinitializing sockets module");
+
+    // Stop and destroy websocket client
+    socket_deinit();
+
+    // Delete task if it exists
+    if (xSocketsTask != NULL) {
+        vTaskDelete(xSocketsTask);
+        xSocketsTask = NULL;
+    }
+
+    // Delete queue
+    if (xSocketsQueue != NULL) {
+        vQueueDelete(xSocketsQueue);
+        xSocketsQueue = NULL;
+    }
+
+    // Delete mutex
+    if (render_requests_mutex != NULL) {
+        vSemaphoreDelete(render_requests_mutex);
+        render_requests_mutex = NULL;
+    }
+
+    ESP_LOGI(TAG, "Sockets module deinitialized");
 }
 
 void sockets_connect()
 {
     if (client == NULL) {
+        ESP_LOGW(TAG, "Cannot connect: websocket client not initialized");
         return;
     }
 
-    esp_websocket_client_start(client);
+    esp_err_t ret = esp_websocket_client_start(client);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start websocket client: %s", esp_err_to_name(ret));
+    }
+    else {
+        ESP_LOGI(TAG, "Websocket client start initiated");
+    }
 }
 
 void sockets_disconnect()
 {
     if (client == NULL) {
+        ESP_LOGW(TAG, "Cannot disconnect: websocket client not initialized");
         return;
     }
 
-    esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
+    esp_err_t ret = esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to close websocket client: %s", esp_err_to_name(ret));
+    }
+    else {
+        ESP_LOGI(TAG, "Websocket client disconnect initiated");
+    }
 }
 
 void send_socket_message(Kd__DeviceAPIMessage* message)
@@ -307,11 +688,25 @@ void send_socket_message(Kd__DeviceAPIMessage* message)
         free(buffer);  // Free buffer if queue send fails
         return;
     }
-
-    ESP_LOGI(TAG, "sent message to queue: %.*s", (int)len, p_message.message);
 }
 
 void request_render(uint8_t* schedule_item_uuid) {
+    if (schedule_item_uuid == NULL) {
+        ESP_LOGE(TAG, "request_render called with null UUID");
+        return;
+    }
+
+    // Check if a render request for this UUID is already pending
+    if (is_render_request_pending(schedule_item_uuid)) {
+        ESP_LOGD(TAG, "Render request already pending for UUID, skipping duplicate");
+        return;
+    }
+
+    // Add to pending requests tracking
+    if (!add_pending_render_request(schedule_item_uuid)) {
+        ESP_LOGW(TAG, "Failed to add render request to pending list, sending anyway");
+    }
+
     send_render_request_internal(schedule_item_uuid);
 }
 

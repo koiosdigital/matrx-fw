@@ -99,7 +99,7 @@ void decoder_task(void* pvParameter) {
             }
         }
 
-        if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
+        if (xSemaphoreTake(xWebPSemaphore, pdMS_TO_TICKS(100)) == pdTRUE) {
             //check if someone's destroyed our decoder
             if (dec == NULL) {
                 xSemaphoreGive(xWebPSemaphore);
@@ -107,46 +107,39 @@ void decoder_task(void* pvParameter) {
                 continue;
             }
 
-            if (!WebPAnimDecoderHasMoreFrames(dec)) {
+            // Quick operations only while holding semaphore
+            bool has_more_frames = WebPAnimDecoderHasMoreFrames(dec);
+            bool get_next_success = false;
+            int timestamp;
+
+            if (!has_more_frames) {
                 WebPAnimDecoderReset(dec);
+                // Reset timing variables here while holding lock
                 anim_start_tick = 0;
+                last_timestamp = 0;
             }
 
             if (anim_start_tick == 0) {
                 anim_start_tick = xTaskGetTickCount();
+                last_timestamp = 0;  // Ensure first frame starts from 0
             }
 
-            int timestamp;
+            get_next_success = WebPAnimDecoderGetNext(dec, &frame_buffer, &timestamp);
+            xSemaphoreGive(xWebPSemaphore);  // Release ASAP
 
-            if (!WebPAnimDecoderGetNext(dec, &frame_buffer, &timestamp)) {
+            if (!get_next_success) {
+                // Handle error without holding semaphore
                 ESP_LOGE(TAG, "error getting next frame, restarting decoder");
-                // Destroy and recreate the decoder on error
-                WebPAnimDecoderDelete(dec);
-                dec = NULL;
-                xSemaphoreGive(xWebPSemaphore);
+                destroy_decoder();  // This will handle semaphore internally
 
-                // Restart the decoder with limited retries
-                esp_err_t err;
-                int retry_count = 0;
-                const int max_retries = 5;
-
-                do {
-                    err = start_decoder();
-                    if (err != ESP_OK) {
-                        retry_count++;
-                        ESP_LOGW(TAG, "Failed to restart decoder, retry %d/%d", retry_count, max_retries);
-                        vTaskDelay(pdMS_TO_TICKS(200)); // Wait 200ms before retry
-                    }
-                } while (err != ESP_OK && retry_count < max_retries);
-
+                // Restart with timeout to prevent infinite loops
+                esp_err_t err = start_decoder();
                 if (err != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to restart decoder after %d retries, stopping", max_retries);
+                    ESP_LOGE(TAG, "Failed to restart decoder, stopping");
                     active = false;
                 }
                 continue;
             }
-
-            xSemaphoreGive(xWebPSemaphore);
 
             //display the frame
             if (frame_buffer == NULL) {
@@ -360,6 +353,16 @@ void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
 #endif
 
     free(p_raw_buf);
+}
+
+void display_set_brightness(uint8_t brightness) {
+#if DISPLAY_ENABLED
+    if (dma_display != nullptr) {
+        dma_display->setBrightness(brightness);
+    }
+#else
+    ESP_LOGW(TAG, "Display is not enabled, cannot set brightness");
+#endif
 }
 
 void display_clear_status_bar() {

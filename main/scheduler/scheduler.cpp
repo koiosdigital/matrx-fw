@@ -7,6 +7,7 @@
 
 #include "sprites.h"
 #include "sockets.h"
+#include "daughterboard.h"
 
 #include <string.h>
 
@@ -27,7 +28,42 @@ bool has_valid_schedule = false;
 typedef enum ScheduleTaskNotification_t {
     SCHEDULE_TASK_SKIP_CURRENT,
     SCHEDULE_TASK_PIN_CURRENT,
+    SCHEDULE_TASK_NEXT_ITEM,
+    SCHEDULE_TASK_PREVIOUS_ITEM,
 } ScheduleTaskNotification_t;
+
+// Button event handler for scheduler navigation
+static void button_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base != DAUGHTERBOARD_EVENTS) {
+        return;
+    }
+
+    button_event_t* button_event = (button_event_t*)event_data;
+
+    switch (event_id) {
+    case DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED:
+        ESP_LOGI(TAG, "Button A pressed - going to previous item");
+        if (xSchedulerTask != NULL) {
+            xTaskNotify(xSchedulerTask, SCHEDULE_TASK_PREVIOUS_ITEM, eSetValueWithOverwrite);
+        }
+        break;
+
+    case DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED:
+        ESP_LOGI(TAG, "Button C pressed - going to next item");
+        if (xSchedulerTask != NULL) {
+            xTaskNotify(xSchedulerTask, SCHEDULE_TASK_NEXT_ITEM, eSetValueWithOverwrite);
+        }
+        break;
+
+    case DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED:
+        // Button B can be used for other functions if needed
+        ESP_LOGI(TAG, "Button B pressed - no action assigned");
+        break;
+
+    default:
+        break;
+    }
+}
 
 // Helper functions
 bool schedule_item_valid_uuid(ScheduleItem_t* item) {
@@ -92,6 +128,38 @@ uint32_t find_next_valid_item() {
     return MAX_SCHEDULE_ITEMS; // No valid items found
 }
 
+// Find previous valid item to display
+uint32_t find_previous_valid_item() {
+    if (!has_valid_schedule) {
+        return MAX_SCHEDULE_ITEMS; // Invalid index
+    }
+
+    // Find previous valid, non-skipped item
+    uint32_t prev_item = current_schedule_item;
+    for (uint32_t iterations = 0; iterations < MAX_SCHEDULE_ITEMS; iterations++) {
+        // Move backwards with wraparound
+        if (prev_item == 0) {
+            prev_item = MAX_SCHEDULE_ITEMS - 1;
+        }
+        else {
+            prev_item--;
+        }
+
+        if (!schedule_item_valid_uuid(&schedule_items[prev_item])) {
+            continue;
+        }
+
+        if (schedule_items[prev_item].flags.skipped_user) {
+            continue;
+        }
+
+        // Found valid item
+        return prev_item;
+    }
+
+    return MAX_SCHEDULE_ITEMS; // No valid items found
+}
+
 // Request render for items that need it
 void request_renders_for_upcoming_items() {
     if (!has_valid_schedule) {
@@ -126,9 +194,12 @@ void request_renders_for_upcoming_items() {
 
     // Helper function to check if item needs rendering
     auto needs_render = [](uint32_t item_idx) {
-        return schedule_items[item_idx].sprite == NULL ||
-            schedule_items[item_idx].sprite->data == NULL ||
-            schedule_items[item_idx].flags.skipped_server;
+        if (schedule_items[item_idx].sprite == NULL) {
+            return true;
+        }
+        // Use thread-safe function to check if sprite has data
+        size_t len = sprite_get_length(schedule_items[item_idx].sprite);
+        return len == 0 || schedule_items[item_idx].flags.skipped_server;
         };
 
     // Request render for next item if needed
@@ -192,6 +263,58 @@ void scheduler_task(void* pvParameter) {
                     ESP_LOGI(TAG, "Pinned item %d", current_schedule_item);
                 }
                 break;
+
+            case SCHEDULE_TASK_NEXT_ITEM:
+            {
+                uint32_t next_item = find_next_valid_item();
+                if (next_item < MAX_SCHEDULE_ITEMS && next_item != current_schedule_item) {
+                    ESP_LOGI(TAG, "Manual navigation: moving to next item %d", next_item);
+                    current_schedule_item = next_item;
+                    current_display_time_remaining = schedule_items[next_item].flags.display_time;
+
+                    // Unpin all items when manually navigating
+                    for (int i = 0; i < MAX_SCHEDULE_ITEMS; i++) {
+                        schedule_items[i].flags.pinned = false;
+                    }
+
+                    // Display the item immediately if it has valid sprite data
+                    if (schedule_items[next_item].sprite != NULL &&
+                        sprite_get_length(schedule_items[next_item].sprite) > 0) {
+                        show_sprite(schedule_items[next_item].sprite);
+                    }
+                    else {
+                        ESP_LOGW(TAG, "Next item %d has no sprite data, requesting render", next_item);
+                        request_render(schedule_items[next_item].uuid);
+                    }
+                }
+            }
+            break;
+
+            case SCHEDULE_TASK_PREVIOUS_ITEM:
+            {
+                uint32_t prev_item = find_previous_valid_item();
+                if (prev_item < MAX_SCHEDULE_ITEMS && prev_item != current_schedule_item) {
+                    ESP_LOGI(TAG, "Manual navigation: moving to previous item %d", prev_item);
+                    current_schedule_item = prev_item;
+                    current_display_time_remaining = schedule_items[prev_item].flags.display_time;
+
+                    // Unpin all items when manually navigating
+                    for (int i = 0; i < MAX_SCHEDULE_ITEMS; i++) {
+                        schedule_items[i].flags.pinned = false;
+                    }
+
+                    // Display the item immediately if it has valid sprite data
+                    if (schedule_items[prev_item].sprite != NULL &&
+                        sprite_get_length(schedule_items[prev_item].sprite) > 0) {
+                        show_sprite(schedule_items[prev_item].sprite);
+                    }
+                    else {
+                        ESP_LOGW(TAG, "Previous item %d has no sprite data, requesting render", prev_item);
+                        request_render(schedule_items[prev_item].uuid);
+                    }
+                }
+            }
+            break;
             }
 
             xSemaphoreGive(schedule_mutex);
@@ -241,8 +364,18 @@ void scheduler_task(void* pvParameter) {
             }
 
             // Check if item has valid sprite data
-            if (schedule_items[next_item].sprite == NULL ||
-                schedule_items[next_item].sprite->data == NULL) {
+            if (schedule_items[next_item].sprite == NULL) {
+                ESP_LOGW(TAG, "Item %d has no sprite, requesting render", next_item);
+                request_render(schedule_items[next_item].uuid);
+                current_schedule_item = next_item;
+                current_display_time_remaining = 0; // Force immediate advance to next
+                xSemaphoreGive(schedule_mutex);
+                continue;
+            }
+
+            // Use thread-safe function to check sprite data
+            size_t sprite_len = sprite_get_length(schedule_items[next_item].sprite);
+            if (sprite_len == 0) {
                 ESP_LOGW(TAG, "Item %d has no sprite data, requesting render", next_item);
                 request_render(schedule_items[next_item].uuid);
                 current_schedule_item = next_item;
@@ -381,6 +514,18 @@ void scheduler_skip_current_schedule_item() {
     }
 }
 
+void scheduler_goto_next_item() {
+    if (xSchedulerTask != NULL) {
+        xTaskNotify(xSchedulerTask, SCHEDULE_TASK_NEXT_ITEM, eSetValueWithOverwrite);
+    }
+}
+
+void scheduler_goto_previous_item() {
+    if (xSchedulerTask != NULL) {
+        xTaskNotify(xSchedulerTask, SCHEDULE_TASK_PREVIOUS_ITEM, eSetValueWithOverwrite);
+    }
+}
+
 void scheduler_start() {
     xSemaphoreTake(schedule_mutex, portMAX_DELAY);
     scheduler_running = true;
@@ -402,5 +547,10 @@ void scheduler_init() {
     // Create the scheduler task
     xTaskCreate(scheduler_task, "scheduler", 8192, NULL, 5, &xSchedulerTask);
 
-    ESP_LOGI(TAG, "Scheduler initialized");
+    // Register button event handlers for navigation
+    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED, button_event_handler, NULL);
+    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED, button_event_handler, NULL);
+    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED, button_event_handler, NULL);
+
+    ESP_LOGI(TAG, "Scheduler initialized with button navigation");
 }

@@ -21,5 +21,6 @@ size_t get_display_buffer_size();
 void get_display_dimensions(int* w, int* h);
 void display_clear_status_bar();
 void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b);
+void display_set_brightness(uint8_t brightness);
 
 #endif

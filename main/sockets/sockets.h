@@ -7,6 +7,7 @@
 #define SOCKETS_URI "ws://192.168.0.141:9091"
 
 void sockets_init();
+void sockets_deinit();
 void sockets_disconnect();
 void sockets_connect();
 
