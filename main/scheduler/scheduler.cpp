@@ -38,26 +38,17 @@ static void button_event_handler(void* arg, esp_event_base_t event_base, int32_t
         return;
     }
 
-    button_event_t* button_event = (button_event_t*)event_data;
-
     switch (event_id) {
     case DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED:
-        ESP_LOGI(TAG, "Button A pressed - going to previous item");
         if (xSchedulerTask != NULL) {
             xTaskNotify(xSchedulerTask, SCHEDULE_TASK_PREVIOUS_ITEM, eSetValueWithOverwrite);
         }
         break;
 
     case DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED:
-        ESP_LOGI(TAG, "Button C pressed - going to next item");
         if (xSchedulerTask != NULL) {
             xTaskNotify(xSchedulerTask, SCHEDULE_TASK_NEXT_ITEM, eSetValueWithOverwrite);
         }
-        break;
-
-    case DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED:
-        // Button B can be used for other functions if needed
-        ESP_LOGI(TAG, "Button B pressed - no action assigned");
         break;
 
     default:
@@ -175,12 +166,10 @@ void request_renders_for_upcoming_items() {
     if (next_item == current_schedule_item) {
         // Pinned items: request rerender 1 second before expiry
         if (schedule_items[current_schedule_item].flags.pinned && current_display_time_remaining <= 1) {
-            ESP_LOGI(TAG, "Requesting rerender for pinned item %d", current_schedule_item);
             request_render(schedule_items[current_schedule_item].uuid);
         }
         // Single item schedules: request rerender exactly 3 seconds before expiry
         else if (get_schedule_size() == 1 && current_display_time_remaining == 3) {
-            ESP_LOGI(TAG, "Requesting rerender for single item %d (3s before loop)", current_schedule_item);
             request_render(schedule_items[current_schedule_item].uuid);
         }
         return;
@@ -188,7 +177,6 @@ void request_renders_for_upcoming_items() {
 
     // Multi-item schedules: request rerender for next item 3 seconds before current item expires
     if (get_schedule_size() > 1 && current_display_time_remaining == 3) {
-        ESP_LOGI(TAG, "Requesting rerender for next item %d (3s before display)", next_item);
         request_render(schedule_items[next_item].uuid);
     }
 
@@ -204,7 +192,6 @@ void request_renders_for_upcoming_items() {
 
     // Request render for next item if needed
     if (needs_render(next_item)) {
-        ESP_LOGI(TAG, "Requesting render for item %d", next_item);
         request_render(schedule_items[next_item].uuid);
     }
 
@@ -219,7 +206,6 @@ void request_renders_for_upcoming_items() {
         }
 
         if (needs_render(look_ahead_item)) {
-            ESP_LOGI(TAG, "Pre-requesting render for upcoming item %d", look_ahead_item);
             request_render(schedule_items[look_ahead_item].uuid);
         }
     }
@@ -247,7 +233,6 @@ void scheduler_task(void* pvParameter) {
                     schedule_items[current_schedule_item].flags.skipped_user = true;
                     schedule_items[current_schedule_item].flags.pinned = false;
                     current_display_time_remaining = 0; // Force immediate advance
-                    ESP_LOGI(TAG, "User skipped item %d", current_schedule_item);
                 }
                 break;
 
@@ -260,7 +245,6 @@ void scheduler_task(void* pvParameter) {
                     }
                     // Pin current item
                     schedule_items[current_schedule_item].flags.pinned = true;
-                    ESP_LOGI(TAG, "Pinned item %d", current_schedule_item);
                 }
                 break;
 
@@ -268,7 +252,6 @@ void scheduler_task(void* pvParameter) {
             {
                 uint32_t next_item = find_next_valid_item();
                 if (next_item < MAX_SCHEDULE_ITEMS && next_item != current_schedule_item) {
-                    ESP_LOGI(TAG, "Manual navigation: moving to next item %d", next_item);
                     current_schedule_item = next_item;
                     current_display_time_remaining = schedule_items[next_item].flags.display_time;
 
@@ -283,7 +266,6 @@ void scheduler_task(void* pvParameter) {
                         show_sprite(schedule_items[next_item].sprite);
                     }
                     else {
-                        ESP_LOGW(TAG, "Next item %d has no sprite data, requesting render", next_item);
                         request_render(schedule_items[next_item].uuid);
                     }
                 }
@@ -294,7 +276,6 @@ void scheduler_task(void* pvParameter) {
             {
                 uint32_t prev_item = find_previous_valid_item();
                 if (prev_item < MAX_SCHEDULE_ITEMS && prev_item != current_schedule_item) {
-                    ESP_LOGI(TAG, "Manual navigation: moving to previous item %d", prev_item);
                     current_schedule_item = prev_item;
                     current_display_time_remaining = schedule_items[prev_item].flags.display_time;
 
@@ -309,7 +290,6 @@ void scheduler_task(void* pvParameter) {
                         show_sprite(schedule_items[prev_item].sprite);
                     }
                     else {
-                        ESP_LOGW(TAG, "Previous item %d has no sprite data, requesting render", prev_item);
                         request_render(schedule_items[prev_item].uuid);
                     }
                 }
@@ -339,7 +319,6 @@ void scheduler_task(void* pvParameter) {
                 schedule_items[current_schedule_item].flags.pinned &&
                 current_display_time_remaining == 0) {
                 current_display_time_remaining = schedule_items[current_schedule_item].flags.display_time;
-                ESP_LOGI(TAG, "Reset display time for pinned item %d", current_schedule_item);
             }
         }
 
@@ -348,7 +327,6 @@ void scheduler_task(void* pvParameter) {
             uint32_t next_item = find_next_valid_item();
 
             if (next_item >= MAX_SCHEDULE_ITEMS) {
-                ESP_LOGW(TAG, "No valid items found, requesting new schedule");
                 has_valid_schedule = false;
                 xSemaphoreGive(schedule_mutex);
                 continue;
@@ -356,7 +334,6 @@ void scheduler_task(void* pvParameter) {
 
             // Skip server-skipped items
             if (schedule_items[next_item].flags.skipped_server) {
-                ESP_LOGI(TAG, "Skipping server-skipped item %d", next_item);
                 current_schedule_item = next_item;
                 current_display_time_remaining = 0; // Force immediate advance to next
                 xSemaphoreGive(schedule_mutex);
@@ -365,7 +342,6 @@ void scheduler_task(void* pvParameter) {
 
             // Check if item has valid sprite data
             if (schedule_items[next_item].sprite == NULL) {
-                ESP_LOGW(TAG, "Item %d has no sprite, requesting render", next_item);
                 request_render(schedule_items[next_item].uuid);
                 current_schedule_item = next_item;
                 current_display_time_remaining = 0; // Force immediate advance to next
@@ -376,7 +352,6 @@ void scheduler_task(void* pvParameter) {
             // Use thread-safe function to check sprite data
             size_t sprite_len = sprite_get_length(schedule_items[next_item].sprite);
             if (sprite_len == 0) {
-                ESP_LOGW(TAG, "Item %d has no sprite data, requesting render", next_item);
                 request_render(schedule_items[next_item].uuid);
                 current_schedule_item = next_item;
                 current_display_time_remaining = 0; // Force immediate advance to next
@@ -400,7 +375,6 @@ void scheduler_task(void* pvParameter) {
 
 void scheduler_set_schedule(Kd__ScheduleResponse* schedule_response) {
     if (schedule_response->n_schedule_items == 0) {
-        ESP_LOGI(TAG, "Received empty schedule");
         scheduler_clear();
         return;
     }
@@ -412,7 +386,6 @@ void scheduler_set_schedule(Kd__ScheduleResponse* schedule_response) {
         Kd__ScheduleItem* item = schedule_response->schedule_items[i];
 
         if (item->uuid.len != UUID_SIZE_BYTES) {
-            ESP_LOGE(TAG, "Invalid UUID size");
             continue;
         }
 
@@ -421,8 +394,8 @@ void scheduler_set_schedule(Kd__ScheduleResponse* schedule_response) {
 
         memcpy(schedule_item->uuid, item->uuid.data, UUID_SIZE_BYTES);
         schedule_item->flags.pinned = item->pinned;
-        schedule_item->flags.skipped_server = item->skipped_by_server;
-        schedule_item->flags.skipped_user = item->skipped_by_user;
+        schedule_item->flags.skipped_server = false;
+        schedule_item->flags.skipped_user = item->skipped;
         schedule_item->flags.display_time = item->display_time;
 
         // Preserve existing sprite if item already exists
@@ -468,8 +441,6 @@ void scheduler_clear() {
     scheduler_running = false;
     current_schedule_item = 0;
     current_display_time_remaining = 0;
-
-    ESP_LOGI(TAG, "Schedule cleared");
     xSemaphoreGive(schedule_mutex);
 }
 
@@ -479,7 +450,6 @@ void scheduler_skip_schedule_item(uint8_t* schedule_item_uuid) {
     ScheduleItem_t* schedule_item = find_schedule_item(schedule_item_uuid);
     if (schedule_item != NULL) {
         schedule_item->flags.skipped_user = true;
-        ESP_LOGI(TAG, "Marked item as user-skipped");
     }
 
     xSemaphoreGive(schedule_mutex);
@@ -496,7 +466,6 @@ void scheduler_pin_schedule_item(uint8_t* schedule_item_uuid) {
     ScheduleItem_t* schedule_item = find_schedule_item(schedule_item_uuid);
     if (schedule_item != NULL) {
         schedule_item->flags.pinned = true;
-        ESP_LOGI(TAG, "Pinned schedule item");
     }
 
     xSemaphoreGive(schedule_mutex);
@@ -529,14 +498,12 @@ void scheduler_goto_previous_item() {
 void scheduler_start() {
     xSemaphoreTake(schedule_mutex, portMAX_DELAY);
     scheduler_running = true;
-    ESP_LOGI(TAG, "Scheduler started");
     xSemaphoreGive(schedule_mutex);
 }
 
 void scheduler_stop() {
     xSemaphoreTake(schedule_mutex, portMAX_DELAY);
     scheduler_running = false;
-    ESP_LOGI(TAG, "Scheduler stopped");
     xSemaphoreGive(schedule_mutex);
 }
 
@@ -547,10 +514,7 @@ void scheduler_init() {
     // Create the scheduler task
     xTaskCreate(scheduler_task, "scheduler", 8192, NULL, 5, &xSchedulerTask);
 
-    // Register button event handlers for navigation
     esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED, button_event_handler, NULL);
     esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED, button_event_handler, NULL);
     esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED, button_event_handler, NULL);
-
-    ESP_LOGI(TAG, "Scheduler initialized with button navigation");
 }

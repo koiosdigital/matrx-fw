@@ -12,8 +12,6 @@ typedef struct RAMSprite_t {
     SemaphoreHandle_t mutex;
 } RAMSprite_t;
 
-void sprites_init();
-
 RAMSprite_t* sprite_allocate();
 void sprite_update_data(RAMSprite_t* sprite, uint8_t* data, size_t len);
 void sprite_free(RAMSprite_t* sprite);
@@ -25,5 +23,6 @@ size_t sprite_get_length(RAMSprite_t* sprite);
 
 void show_fs_sprite(const char* filename);
 void show_sprite(RAMSprite_t* sprite);
+void list_static_images(); // List available static images
 
 #endif

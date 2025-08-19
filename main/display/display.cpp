@@ -37,7 +37,7 @@ DisplayStatusBar_t current_status_bar = {
     .b = 0
 };
 
-void destroy_decoder() {
+void IRAM_ATTR destroy_decoder() {
     if (dec != NULL) {
         if (xSemaphoreTake(xWebPSemaphore, portMAX_DELAY) == pdTRUE) {
             WebPAnimDecoderDelete(dec);
@@ -47,7 +47,7 @@ void destroy_decoder() {
     }
 }
 
-esp_err_t start_decoder() {
+esp_err_t IRAM_ATTR start_decoder() {
     destroy_decoder();
 
     if (webp_data.bytes == NULL || webp_data.size == 0) {
@@ -82,7 +82,7 @@ esp_err_t start_decoder() {
     return ESP_OK;
 }
 
-void decoder_task(void* pvParameter) {
+void IRAM_ATTR decoder_task(void* pvParameter) {
     WebPTaskNotification_t notification;
     bool active = false;
 
@@ -232,7 +232,7 @@ void wifi_prov_connected(void* arg, esp_event_base_t event_base, int32_t event_i
 }
 
 void wifi_prov_started(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    show_fs_sprite("/fs/ble_prov.webp");
+    show_fs_sprite("ble_prov");
 }
 
 void provisioning_event_handler2(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
@@ -244,7 +244,7 @@ void provisioning_event_handler2(void* arg, esp_event_base_t event_base, int32_t
             esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg);
 
             if (strlen((const char*)wifi_cfg.sta.ssid) != 0) {
-                show_fs_sprite("/fs/connect_wifi.webp");
+                show_fs_sprite("connect");
                 break;
             }
             break;
@@ -273,6 +273,7 @@ void display_init() {
     };
 
     HUB75_I2S_CFG mxconfig(CONFIG_MATRIX_WIDTH, CONFIG_MATRIX_HEIGHT, 1, pins);
+    mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_20M; // Set I2S clock speed
 
 #if DISPLAY_ENABLED
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
@@ -284,21 +285,25 @@ void display_init() {
 
     xWebPSemaphore = xSemaphoreCreateMutex();
 
-    xTaskCreatePinnedToCore(decoder_task, "decoder", 4096, NULL, 3, &xDecoderTask, 1);
+    xTaskCreatePinnedToCore(decoder_task, "decoder", 4096, NULL, 10, &xDecoderTask, 1);
 
     //Display QR code once connected to endpoint device
     esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, PROTOCOMM_TRANSPORT_BLE_CONNECTED, &wifi_prov_connected, NULL);
     esp_event_handler_register(WIFI_PROV_EVENT, WIFI_PROV_START, &wifi_prov_started, NULL);
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START, &provisioning_event_handler2, NULL);
 
-    show_fs_sprite("/fs/boot.webp");
+    show_fs_sprite("boot");
     vTaskDelay(pdMS_TO_TICKS(1200));
 }
 
-esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
+esp_err_t IRAM_ATTR display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
     if (p_sprite_buf == NULL || sprite_buf_len == 0) {
         ESP_LOGE(TAG, "invalid sprite buffer");
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (p_sprite_buf == webp_data.bytes && sprite_buf_len == webp_data.size) {
+        return ESP_OK;
     }
 
     destroy_decoder();

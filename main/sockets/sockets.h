@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define SOCKETS_URI "ws://192.168.0.141:9091"
+#define SOCKETS_URI "wss://device.api.koiosdigital.net"
 
 void sockets_init();
 void sockets_deinit();

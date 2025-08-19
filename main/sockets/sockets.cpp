@@ -48,6 +48,9 @@ static SemaphoreHandle_t render_requests_mutex = NULL;
 static int64_t last_websocket_activity_ms = 0;
 #define CONNECTION_WATCHDOG_TIMEOUT_MS 60000  // 60 seconds of no activity triggers reconnect
 
+// WiFi connectivity state - tracks if we can connect to WebSocket
+static bool connectable = false;
+
 // Task notifications for socket operations
 typedef enum SocketTaskNotification_t {
     SOCKET_TASK_REINIT = 1,
@@ -154,7 +157,21 @@ static void clear_all_pending_render_requests() {
     }
 
     xSemaphoreGive(render_requests_mutex);
-    ESP_LOGI(TAG, "Cleared all pending render requests");
+}
+
+// Static variables for certificate handling - initialized once and reused
+static char* static_cert = NULL;
+static size_t static_cert_len = 0;
+static esp_ds_data_ctx_t* static_ds_data_ctx = NULL;
+
+// Helper function to clean up static certificate data
+static void cleanup_static_cert_data() {
+    if (static_cert != NULL) {
+        free(static_cert);
+        static_cert = NULL;
+        static_cert_len = 0;
+        static_ds_data_ctx = NULL;
+    }
 }
 
 typedef struct ProcessableMessage_t {
@@ -171,7 +188,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         last_websocket_activity_ms = esp_timer_get_time() / 1000; // Update activity timestamp
-        show_fs_sprite("/fs/ready.webp");
+        show_fs_sprite("ready");
         request_schedule();
         attempt_coredump_upload();
         break;
@@ -183,7 +200,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
         }
         // Clear all pending render requests since websocket is disconnected
         clear_all_pending_render_requests();
-        show_fs_sprite("/fs/connect_cloud.webp");
+        show_fs_sprite("connect");
         if (xSocketsTask != NULL) {
             xTaskNotify(xSocketsTask, SOCKET_TASK_RECONNECT, eSetValueWithOverwrite);
         }
@@ -242,60 +259,58 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
 
 // Websocket initialization function
 static esp_err_t socket_init() {
-    ESP_LOGI(TAG, "Initializing websocket client");
-
     if (client != NULL) {
         ESP_LOGW(TAG, "Client already initialized, deinitializing first");
         socket_deinit();
     }
 
-    esp_ds_data_ctx_t* ds_data_ctx = kd_common_crypto_get_ctx();
-    char* cert = (char*)calloc(4096, sizeof(char));
-    if (cert == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate certificate buffer");
-        return ESP_ERR_NO_MEM;
-    }
+    // Initialize certificate data if not already done
+    if (static_cert == NULL) {
+        static_ds_data_ctx = kd_common_crypto_get_ctx();
+        static_cert = (char*)calloc(4096, sizeof(char));
+        if (static_cert == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate certificate buffer");
+            return ESP_ERR_NO_MEM;
+        }
 
-    size_t cert_len = 4096;
-    esp_err_t ret = kd_common_get_device_cert(cert, &cert_len);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get device certificate: %s", esp_err_to_name(ret));
-        free(cert);
-        return ret;
+        static_cert_len = 4096;
+        esp_err_t ret = kd_common_get_device_cert(static_cert, &static_cert_len);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to get device certificate: %s", esp_err_to_name(ret));
+            free(static_cert);
+            static_cert = NULL;
+            return ret;
+        }
+    }
+    else {
+        ESP_LOGD(TAG, "Using cached certificate data");
     }
 
     esp_websocket_client_config_t websocket_cfg = {
         .uri = SOCKETS_URI,
-        .port = 9091,
+        .port = 443,
+        .client_cert = static_cert,
+        .client_cert_len = static_cert_len + 1,
+        .client_ds_data = static_ds_data_ctx,
+        .crt_bundle_attach = esp_crt_bundle_attach,
         .reconnect_timeout_ms = 1000,      // Faster initial reconnect attempts  
         .network_timeout_ms = 5000,        // Shorter timeout to fail fast and retry
         .ping_interval_sec = 10,           // Keep connection alive with pings
-        //.client_cert = cert,
-        //.client_cert_len = cert_len + 1,
-        //.client_ds_data = ds_data_ctx,
-        //.crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     client = esp_websocket_client_init(&websocket_cfg);
     if (client == NULL) {
         ESP_LOGE(TAG, "Failed to initialize websocket client");
-        free(cert);
         return ESP_FAIL;
     }
 
-    ret = esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void*)client);
+    esp_err_t ret = esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void*)client);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register websocket events: %s", esp_err_to_name(ret));
         esp_websocket_client_destroy(client);
         client = NULL;
-        free(cert);
         return ret;
     }
-
-    // Free the certificate buffer as it's no longer needed after websocket init
-    free(cert);
-
-    ESP_LOGI(TAG, "Websocket client initialized successfully");
     return ESP_OK;
 }
 
@@ -313,15 +328,11 @@ static void socket_deinit() {
 
         // Clear all pending render requests
         clear_all_pending_render_requests();
-
-        ESP_LOGI(TAG, "Websocket client deinitialized");
     }
 }
 
 // Helper function to send actual render request
 static void send_render_request_internal(uint8_t* schedule_item_uuid) {
-    ESP_LOGI(TAG, "sending render request for item");
-
     Kd__RequestRender request = KD__REQUEST_RENDER__INIT;
     request.uuid.data = schedule_item_uuid;
     request.uuid.len = UUID_SIZE_BYTES;
@@ -371,17 +382,21 @@ void handle_render_response(Kd__RenderResponse* response)
     sprite_update_data(item->sprite, response->sprite_data.data, response->sprite_data.len);
 }
 
-void handle_pin_schedule_item(Kd__PinScheduleItem* pin)
+void handle_modify_schedule_item(Kd__ModifyScheduleItem* modify)
 {
-    ESP_LOGI(TAG, "received pin schedule item");
+
 }
 
-void handle_skip_schedule_item(Kd__SkipScheduleItem* skip)
-{
-    ESP_LOGI(TAG, "received skip schedule item");
+void handle_global_message(Kd__KDGlobalMessage* message) {
+    switch (message->message_case) {
+    case KD__KDGLOBAL_MESSAGE__MESSAGE_JOIN_RESPONSE:
+        break;
+    default:
+        break;
+    }
 }
 
-void handle_message(Kd__KDMatrxMessage* message)
+void handle_matrx_message(Kd__KDMatrxMessage* message)
 {
     switch (message->message_case) {
     case KD__KDMATRX_MESSAGE__MESSAGE_SCHEDULE_RESPONSE:
@@ -390,11 +405,8 @@ void handle_message(Kd__KDMatrxMessage* message)
     case KD__KDMATRX_MESSAGE__MESSAGE_RENDER_RESPONSE:
         handle_render_response(message->render_response);
         break;
-    case KD__KDMATRX_MESSAGE__MESSAGE_PIN_SCHEDULE_ITEM:
-        handle_pin_schedule_item(message->pin_schedule_item);
-        break;
-    case KD__KDMATRX_MESSAGE__MESSAGE_SKIP_SCHEDULE_ITEM:
-        handle_skip_schedule_item(message->skip_schedule_item);
+    case KD__KDMATRX_MESSAGE__MESSAGE_MODIFY_SCHEDULE_ITEM:
+        handle_modify_schedule_item(message->modify_schedule_item);
         break;
     default:
         break;
@@ -405,10 +417,16 @@ void handle_message(Kd__KDMatrxMessage* message)
 
 void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT) {
-        sockets_disconnect();
+        if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            connectable = false;
+            sockets_disconnect();
+        }
     }
     if (event_base == IP_EVENT) {
-        sockets_connect();
+        if (event_id == IP_EVENT_STA_GOT_IP) {
+            connectable = true;
+            sockets_connect();
+        }
     }
 }
 
@@ -540,12 +558,18 @@ void sockets_task(void* pvParameter)
                 free(message.message);
                 continue;
             }
-            if (device_message->message_case != KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE) {
-                kd__device_apimessage__free_unpacked(device_message, NULL);
-                free(message.message);
-                continue;
+
+            switch (device_message->message_case) {
+            case KD__DEVICE_APIMESSAGE__MESSAGE_KD_GLOBAL_MESSAGE:
+                handle_global_message(device_message->kd_global_message);
+                break;
+            case KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE:
+                handle_matrx_message(device_message->kd_matrx_message);
+                break;
+            default:
+                break;
             }
-            handle_message(device_message->kd_matrx_message);
+
             kd__device_apimessage__free_unpacked(device_message, NULL);
             free(message.message);
         }
@@ -578,7 +602,7 @@ void sockets_task(void* pvParameter)
 
 void sockets_init()
 {
-    ESP_LOGI(TAG, "Initializing sockets module");
+    connectable = false;
 
     xSocketsQueue = xQueueCreate(20, sizeof(ProcessableMessage_t));
     if (xSocketsQueue == NULL) {
@@ -598,16 +622,18 @@ void sockets_init()
         ESP_LOGE(TAG, "Failed to create sockets task");
         return;
     }
-
-    ESP_LOGI(TAG, "Sockets module initialized successfully");
 }
 
 void sockets_deinit()
 {
-    ESP_LOGI(TAG, "Deinitializing sockets module");
+    // Reset connectivity state
+    connectable = false;
 
     // Stop and destroy websocket client
     socket_deinit();
+
+    // Clean up static certificate data
+    cleanup_static_cert_data();
 
     // Delete task if it exists
     if (xSocketsTask != NULL) {
@@ -626,12 +652,15 @@ void sockets_deinit()
         vSemaphoreDelete(render_requests_mutex);
         render_requests_mutex = NULL;
     }
-
-    ESP_LOGI(TAG, "Sockets module deinitialized");
 }
 
 void sockets_connect()
 {
+    if (!connectable) {
+        ESP_LOGW(TAG, "Cannot connect: WiFi not connected (connectable=false)");
+        return;
+    }
+
     if (client == NULL) {
         ESP_LOGW(TAG, "Cannot connect: websocket client not initialized");
         return;
@@ -640,9 +669,6 @@ void sockets_connect()
     esp_err_t ret = esp_websocket_client_start(client);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start websocket client: %s", esp_err_to_name(ret));
-    }
-    else {
-        ESP_LOGI(TAG, "Websocket client start initiated");
     }
 }
 
@@ -657,16 +683,15 @@ void sockets_disconnect()
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to close websocket client: %s", esp_err_to_name(ret));
     }
-    else {
-        ESP_LOGI(TAG, "Websocket client disconnect initiated");
-    }
 }
 
 void send_socket_message(Kd__DeviceAPIMessage* message)
 {
-    // Check if websocket is connected before queuing
+    if (!connectable) {
+        return;
+    }
+
     if (client == NULL || !esp_websocket_client_is_connected(client)) {
-        ESP_LOGW(TAG, "websocket not connected, dropping message");
         return;
     }
 
@@ -741,8 +766,6 @@ void request_schedule() {
 }
 
 void attempt_coredump_upload() {
-    ESP_LOGI(TAG, "attempting coredump upload");
-
     // Find the coredump partition
     const esp_partition_t* core_dump_partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, "coredump");
@@ -783,7 +806,6 @@ void attempt_coredump_upload() {
 
     if (is_erased)
     {
-        ESP_LOGI(TAG, "Core dump partition is empty");
         goto exit;
     }
 

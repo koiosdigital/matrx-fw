@@ -2,11 +2,10 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/timers.h>
-#include <freertos/queue.h>
 
 #include "esp_log.h"
 #include "esp_event.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 
@@ -15,9 +14,8 @@ static const char* TAG = "daughterboard";
 // Event base definition
 ESP_EVENT_DEFINE_BASE(DAUGHTERBOARD_EVENTS);
 
-// Task handles
-static TaskHandle_t light_sensor_task_handle = NULL;
-static TaskHandle_t button_monitor_task_handle = NULL;
+// ESP timer handle for light sensor
+static esp_timer_handle_t light_sensor_timer_handle = NULL;
 
 // VEML6030 register definitions
 #define VEML6030_REG_ALS_CONF   0x00
@@ -69,20 +67,13 @@ static TaskHandle_t button_monitor_task_handle = NULL;
 #define VEML6030_CONFIG_ACTIVE      (VEML6030_ALS_SD_ENABLE | VEML6030_IT_100MS | VEML6030_PERS_1 | VEML6030_INT_DISABLE)
 
 // Button debounce timing
-#define BUTTON_DEBOUNCE_MS          50
-#define BUTTON_POLL_INTERVAL_MS     10
+#define BUTTON_DEBOUNCE_US          50000  // 50ms in microseconds
 
 // Light sensor timing
-#define LIGHT_SENSOR_INTERVAL_MS    5000
+#define LIGHT_SENSOR_INTERVAL_US    5000000  // 5 seconds in microseconds
 
-// Button state tracking
-typedef struct {
-    bool last_state;
-    uint32_t last_change_time;
-    bool debounced_state;
-} button_state_t;
-
-static button_state_t button_states[3] = { 0 };
+// Button debounce tracking
+static uint64_t button_last_isr_time[3] = { 0 };
 
 // I2C helper functions
 static esp_err_t veml6030_write_reg(uint8_t reg, uint16_t value) {
@@ -162,96 +153,68 @@ static esp_err_t veml6030_read_reg(uint8_t reg, uint16_t* value) {
     return ret;
 }
 
-// Light sensor task
-static void light_sensor_task(void* pvParameter) {
-    TickType_t last_wake_time = xTaskGetTickCount();
+// Light sensor timer callback
+static void light_sensor_timer_callback(void* arg) {
+    uint16_t lux;
+    esp_err_t ret = daughterboard_get_light_reading(&lux);
 
-    while (1) {
-        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(LIGHT_SENSOR_INTERVAL_MS));
+    if (ret == ESP_OK) {
+        light_reading_t reading = {
+            .lux = lux,
+            .timestamp = (uint32_t)(esp_timer_get_time() / 1000)  // Convert to ms
+        };
 
-        uint16_t lux;
-        esp_err_t ret = daughterboard_get_light_reading(&lux);
+        esp_event_post(DAUGHTERBOARD_EVENTS,
+            DAUGHTERBOARD_EVENT_LIGHT_READING,
+            &reading,
+            sizeof(reading),
+            0);
+    }
+    else {
+        ESP_LOGW(TAG, "Failed to read light sensor: %s", esp_err_to_name(ret));
 
-        if (ret == ESP_OK) {
-            light_reading_t reading = {
-                .lux = lux,
-                .timestamp = xTaskGetTickCount() * portTICK_PERIOD_MS
-            };
-
-            esp_event_post(DAUGHTERBOARD_EVENTS,
-                DAUGHTERBOARD_EVENT_LIGHT_READING,
-                &reading,
-                sizeof(reading),
-                0);
+        // Try to read raw register for debugging
+        uint16_t raw_debug;
+        esp_err_t debug_ret = veml6030_read_reg(VEML6030_REG_ALS, &raw_debug);
+        if (debug_ret == ESP_OK) {
+            ESP_LOGW(TAG, "Raw ALS register value: %u", raw_debug);
         }
         else {
-            ESP_LOGW(TAG, "Failed to read light sensor: %s", esp_err_to_name(ret));
-
-            // Try to read raw register for debugging
-            uint16_t raw_debug;
-            esp_err_t debug_ret = veml6030_read_reg(VEML6030_REG_ALS, &raw_debug);
-            if (debug_ret == ESP_OK) {
-                ESP_LOGW(TAG, "Raw ALS register value: %u", raw_debug);
-            }
-            else {
-                ESP_LOGE(TAG, "Cannot even read raw ALS register: %s", esp_err_to_name(debug_ret));
-            }
+            ESP_LOGE(TAG, "Cannot even read raw ALS register: %s", esp_err_to_name(debug_ret));
         }
     }
 }
 
-// Button monitoring task
-static void button_monitor_task(void* pvParameter) {
-    ESP_LOGI(TAG, "Button monitor task started");
+// Button ISR handler
+static void IRAM_ATTR button_isr_handler(void* arg) {
+    ESP_EARLY_LOGI(TAG, "Button ISR triggered for GPIO %d", (int)arg);
+    uint32_t button_id = (uint32_t)arg;
+    uint64_t current_time = esp_timer_get_time();
 
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_INTERVAL_MS));
+    // Simple debounce check in ISR
+    if (current_time - button_last_isr_time[button_id] < BUTTON_DEBOUNCE_US) {
+        return;
+    }
+    button_last_isr_time[button_id] = current_time;
 
-        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    daughterboard_event_t event_type;
+    switch (button_id) {
+    case 0: event_type = DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED; break;
+    case 1: event_type = DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED; break;
+    case 2: event_type = DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED; break;
+    default: return;
+    }
 
-        // Check each button
-        for (int i = 0; i < 3; i++) {
-            gpio_num_t gpio_pins[] = { DAUGHTERBOARD_BUTTON_A_GPIO,
-                                     DAUGHTERBOARD_BUTTON_B_GPIO,
-                                     DAUGHTERBOARD_BUTTON_C_GPIO };
+    // Post event from ISR
+    BaseType_t high_task_awoken = pdFALSE;
+    esp_event_isr_post(DAUGHTERBOARD_EVENTS,
+        event_type,
+        NULL,
+        0,
+        &high_task_awoken);
 
-            bool current_state = !gpio_get_level(gpio_pins[i]);  // Active low
-
-            // Check for state change
-            if (current_state != button_states[i].last_state) {
-                button_states[i].last_state = current_state;
-                button_states[i].last_change_time = current_time;
-            }
-
-            // Check if enough time has passed for debouncing
-            if ((current_time - button_states[i].last_change_time) >= BUTTON_DEBOUNCE_MS) {
-                if (current_state != button_states[i].debounced_state) {
-                    button_states[i].debounced_state = current_state;
-
-                    // Button pressed (transition from released to pressed)
-                    if (current_state) {
-                        button_event_t event = {
-                            .button_id = (uint8_t)i,
-                            .timestamp = current_time
-                        };
-
-                        daughterboard_event_t event_type;
-                        switch (i) {
-                        case 0: event_type = DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED; break;
-                        case 1: event_type = DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED; break;
-                        case 2: event_type = DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED; break;
-                        default: continue;
-                        }
-
-                        esp_event_post(DAUGHTERBOARD_EVENTS,
-                            event_type,
-                            &event,
-                            sizeof(event),
-                            0);
-                    }
-                }
-            }
-        }
+    if (high_task_awoken == pdTRUE) {
+        portYIELD_FROM_ISR();
     }
 }
 
@@ -314,16 +277,16 @@ static esp_err_t init_veml6030(void) {
     return ESP_OK;
 }
 
-// Initialize buttons
+// Initialize buttons with ISR
 static esp_err_t init_buttons(void) {
     gpio_config_t io_conf = {
         .pin_bit_mask = ((1ULL << DAUGHTERBOARD_BUTTON_A_GPIO) |
                         (1ULL << DAUGHTERBOARD_BUTTON_B_GPIO) |
                         (1ULL << DAUGHTERBOARD_BUTTON_C_GPIO)),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type = GPIO_INTR_NEGEDGE,  // Trigger on falling edge (button press)
     };
 
     esp_err_t ret = gpio_config(&io_conf);
@@ -332,11 +295,25 @@ static esp_err_t init_buttons(void) {
         return ret;
     }
 
-    // Initialize button states
+    // Install GPIO ISR service
+    ret = gpio_install_isr_service(0);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {  // ESP_ERR_INVALID_STATE means already installed
+        ESP_LOGE(TAG, "Failed to install GPIO ISR service: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Add ISR handlers for each button
+    gpio_num_t gpio_pins[] = { DAUGHTERBOARD_BUTTON_A_GPIO,
+                              DAUGHTERBOARD_BUTTON_B_GPIO,
+                              DAUGHTERBOARD_BUTTON_C_GPIO };
+
     for (int i = 0; i < 3; i++) {
-        button_states[i].last_state = false;
-        button_states[i].debounced_state = false;
-        button_states[i].last_change_time = 0;
+        ret = gpio_isr_handler_add(gpio_pins[i], button_isr_handler, (void*)i);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to add ISR handler for button %d: %s", i, esp_err_to_name(ret));
+            return ret;
+        }
+        button_last_isr_time[i] = 0;
     }
 
     return ESP_OK;
@@ -360,50 +337,54 @@ esp_err_t daughterboard_init(void) {
         return ret;
     }
 
-    // Initialize buttons
+    // Initialize buttons with ISR
     ret = init_buttons();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize buttons: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    // Create light sensor task
-    BaseType_t task_ret = xTaskCreate(light_sensor_task,
-        "light_sensor",
-        4096,
-        NULL,
-        5,
-        &light_sensor_task_handle);
-    if (task_ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create light sensor task");
-        return ESP_FAIL;
+    // Create ESP timer for light sensor
+    const esp_timer_create_args_t light_sensor_timer_args = {
+        .callback = &light_sensor_timer_callback,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "light_sensor"
+    };
+
+    ret = esp_timer_create(&light_sensor_timer_args, &light_sensor_timer_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create light sensor timer: %s", esp_err_to_name(ret));
+        return ret;
     }
 
-    // Create button monitor task
-    task_ret = xTaskCreate(button_monitor_task,
-        "button_monitor",
-        4096,
-        NULL,
-        5,
-        &button_monitor_task_handle);
-    if (task_ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create button monitor task");
-        return ESP_FAIL;
+    // Start the timer (auto-reload, 5 second interval)
+    ret = esp_timer_start_periodic(light_sensor_timer_handle, LIGHT_SENSOR_INTERVAL_US);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start light sensor timer: %s", esp_err_to_name(ret));
+        esp_timer_delete(light_sensor_timer_handle);
+        light_sensor_timer_handle = NULL;
+        return ret;
     }
 
     return ESP_OK;
 }
 
 esp_err_t daughterboard_deinit(void) {
-    // Delete tasks
-    if (light_sensor_task_handle != NULL) {
-        vTaskDelete(light_sensor_task_handle);
-        light_sensor_task_handle = NULL;
+    // Stop and delete timer
+    if (light_sensor_timer_handle != NULL) {
+        esp_timer_stop(light_sensor_timer_handle);
+        esp_timer_delete(light_sensor_timer_handle);
+        light_sensor_timer_handle = NULL;
     }
 
-    if (button_monitor_task_handle != NULL) {
-        vTaskDelete(button_monitor_task_handle);
-        button_monitor_task_handle = NULL;
+    // Remove ISR handlers
+    gpio_num_t gpio_pins[] = { DAUGHTERBOARD_BUTTON_A_GPIO,
+                              DAUGHTERBOARD_BUTTON_B_GPIO,
+                              DAUGHTERBOARD_BUTTON_C_GPIO };
+
+    for (int i = 0; i < 3; i++) {
+        gpio_isr_handler_remove(gpio_pins[i]);
     }
 
     // Deinitialize I2C
@@ -441,5 +422,10 @@ bool daughterboard_is_button_pressed(uint8_t button_id) {
         return false;
     }
 
-    return button_states[button_id].debounced_state;
+    gpio_num_t gpio_pins[] = { DAUGHTERBOARD_BUTTON_A_GPIO,
+                              DAUGHTERBOARD_BUTTON_B_GPIO,
+                              DAUGHTERBOARD_BUTTON_C_GPIO };
+
+    // Read current button state directly (active low)
+    return !gpio_get_level(gpio_pins[button_id]);
 }

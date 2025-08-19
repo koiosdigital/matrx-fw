@@ -5,7 +5,7 @@ file(GLOB_RECURSE NESTED_SRC
 idf_component_register(
     SRCS ${NESTED_SRC}
     INCLUDE_DIRS "." "hw_defs" "display" "sockets" "sprites" "scheduler" "daughterboard"
-    REQUIRES esp_wifi heap ESP32-HUB75-MatrixPanel-DMA libwebp json qrcode bootloader_support protobufs kd_common esp_http_client wifi_provisioning
+    REQUIRES esp_wifi heap ESP32-HUB75-MatrixPanel-DMA libwebp json qrcode bootloader_support protobufs kd_common esp_http_client wifi_provisioning matrx_resources
 )
 
 idf_build_set_property(COMPILE_OPTIONS "-Wno-missing-field-initializers" APPEND)
