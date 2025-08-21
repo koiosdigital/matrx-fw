@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
+#include "display.h"
 
 static const char* TAG = "daughterboard";
 
@@ -59,12 +60,18 @@ static esp_timer_handle_t light_sensor_timer_handle = NULL;
 #define VEML6030_PERS_4             0x0080  // 010  
 #define VEML6030_PERS_8             0x00C0  // 011
 
+// Gain settings (bits 12-11)
+#define VEML6030_GAIN_1             0x0000  // 00 (1x gain)
+#define VEML6030_GAIN_2             0x0800  // 01 (2x gain)
+#define VEML6030_GAIN_1_4           0x1000  // 10 (1/8x gain)
+#define VEML6030_GAIN_1_8           0x1800  // 11 (1/4x gain)
+
 // Interrupt enable (bit 13)
 #define VEML6030_INT_DISABLE        0x0000
 #define VEML6030_INT_ENABLE         0x2000
 
 // Configuration: Power on + 100ms integration time + interrupt disabled + persistence 1
-#define VEML6030_CONFIG_ACTIVE      (VEML6030_ALS_SD_ENABLE | VEML6030_IT_100MS | VEML6030_PERS_1 | VEML6030_INT_DISABLE)
+#define VEML6030_CONFIG_ACTIVE      (VEML6030_ALS_SD_ENABLE | VEML6030_IT_100MS | VEML6030_PERS_1 | VEML6030_INT_DISABLE | VEML6030_GAIN_2)
 
 // Button debounce timing
 #define BUTTON_DEBOUNCE_US          50000  // 50ms in microseconds
@@ -169,6 +176,16 @@ static void light_sensor_timer_callback(void* arg) {
             &reading,
             sizeof(reading),
             0);
+
+        ESP_LOGI(TAG, "Light reading: %u lux", lux);
+
+        //lux is 0,1 -> turn panel off
+        if (lux < 1) {
+            display_set_brightness(0);
+        }
+        else {
+            display_set_brightness(100);
+        }
     }
     else {
         ESP_LOGW(TAG, "Failed to read light sensor: %s", esp_err_to_name(ret));

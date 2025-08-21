@@ -7,6 +7,7 @@
 #include "esp_http_client.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -51,6 +52,10 @@ static int64_t last_websocket_activity_ms = 0;
 // WiFi connectivity state - tracks if we can connect to WebSocket
 static bool connectable = false;
 
+// Socket connection error tracking
+static uint32_t socket_connection_error_count = 0;
+#define MAX_SOCKET_CONNECTION_ERRORS 5
+
 // Task notifications for socket operations
 typedef enum SocketTaskNotification_t {
     SOCKET_TASK_REINIT = 1,
@@ -74,7 +79,6 @@ static void cleanup_expired_render_requests() {
     for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
         if (pending_render_requests[i].in_use) {
             if (current_time - pending_render_requests[i].timestamp_ms >= RENDER_REQUEST_TIMEOUT_MS) {
-                ESP_LOGW(TAG, "Render request timeout for UUID, clearing");
                 pending_render_requests[i].in_use = false;
                 memset(pending_render_requests[i].uuid, 0, UUID_SIZE_BYTES);
             }
@@ -188,6 +192,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         last_websocket_activity_ms = esp_timer_get_time() / 1000; // Update activity timestamp
+        socket_connection_error_count = 0; // Reset error counter on successful connection
         show_fs_sprite("ready");
         request_schedule();
         attempt_coredump_upload();
@@ -212,6 +217,15 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
             dbuf = NULL;
         }
         clear_all_pending_render_requests();
+
+        // Count websocket errors when WiFi is connected
+        if (connectable) {
+            socket_connection_error_count++;
+            if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
+                esp_restart();
+            }
+        }
+
         if (xSocketsTask != NULL) {
             xTaskNotify(xSocketsTask, SOCKET_TASK_REINIT, eSetValueWithOverwrite);
         }
@@ -425,6 +439,7 @@ void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, voi
     if (event_base == IP_EVENT) {
         if (event_id == IP_EVENT_STA_GOT_IP) {
             connectable = true;
+            socket_connection_error_count = 0; // Reset error counter when WiFi connects
             sockets_connect();
         }
     }
@@ -456,10 +471,23 @@ void sockets_task(void* pvParameter)
         esp_err_t ret = socket_init();
         if (ret == ESP_OK) {
             reconnect_delay_ms = 1000; // Reset delay on success
+            socket_connection_error_count = 0; // Reset error counter on successful init
             break;
         }
         else {
             init_retry_count++;
+
+            // Count initialization errors when WiFi is connected
+            if (connectable) {
+                socket_connection_error_count++;
+                ESP_LOGW(TAG, "Socket init error, connection error count: %lu/%d", socket_connection_error_count, MAX_SOCKET_CONNECTION_ERRORS);
+
+                if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
+                    ESP_LOGE(TAG, "Maximum socket connection errors reached (%d), restarting ESP32...", MAX_SOCKET_CONNECTION_ERRORS);
+                    esp_restart();
+                }
+            }
+
             vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
 
             // Exponential backoff with cap
@@ -486,10 +514,23 @@ void sockets_task(void* pvParameter)
                     esp_err_t ret = socket_init();
                     if (ret == ESP_OK) {
                         reconnect_delay_ms = 1000; // Reset delay on success
+                        socket_connection_error_count = 0; // Reset error counter on successful reinit
                         break;
                     }
                     else {
                         ESP_LOGE(TAG, "Failed to reinitialize websocket: %s", esp_err_to_name(ret));
+
+                        // Count reinit errors when WiFi is connected
+                        if (connectable) {
+                            socket_connection_error_count++;
+                            ESP_LOGW(TAG, "Socket reinit error, connection error count: %lu/%d", socket_connection_error_count, MAX_SOCKET_CONNECTION_ERRORS);
+
+                            if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
+                                ESP_LOGE(TAG, "Maximum socket connection errors reached (%d), restarting ESP32...", MAX_SOCKET_CONNECTION_ERRORS);
+                                esp_restart();
+                            }
+                        }
+
                         vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
 
                         // Exponential backoff for next attempt
@@ -512,10 +553,23 @@ void sockets_task(void* pvParameter)
                         if (ret == ESP_OK) {
                             sockets_connect();
                             reconnect_delay_ms = 1000; // Reset delay on success
+                            socket_connection_error_count = 0; // Reset error counter on successful init
                             break;
                         }
                         else {
                             ESP_LOGE(TAG, "Failed to initialize for reconnect: %s", esp_err_to_name(ret));
+
+                            // Count reconnect init errors when WiFi is connected
+                            if (connectable) {
+                                socket_connection_error_count++;
+                                ESP_LOGW(TAG, "Socket reconnect init error, connection error count: %lu/%d", socket_connection_error_count, MAX_SOCKET_CONNECTION_ERRORS);
+
+                                if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
+                                    ESP_LOGE(TAG, "Maximum socket connection errors reached (%d), restarting ESP32...", MAX_SOCKET_CONNECTION_ERRORS);
+                                    esp_restart();
+                                }
+                            }
+
                             vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
 
                             // Exponential backoff
@@ -669,6 +723,17 @@ void sockets_connect()
     esp_err_t ret = esp_websocket_client_start(client);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start websocket client: %s", esp_err_to_name(ret));
+
+        // Count connection errors when WiFi is connected
+        if (connectable) {
+            socket_connection_error_count++;
+            ESP_LOGW(TAG, "Socket connection error count: %lu/%d", socket_connection_error_count, MAX_SOCKET_CONNECTION_ERRORS);
+
+            if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
+                ESP_LOGE(TAG, "Maximum socket connection errors reached (%d), restarting ESP32...", MAX_SOCKET_CONNECTION_ERRORS);
+                esp_restart();
+            }
+        }
     }
 }
 
@@ -720,6 +785,12 @@ void request_render(uint8_t* schedule_item_uuid) {
         ESP_LOGE(TAG, "request_render called with null UUID");
         return;
     }
+
+    char uuid_str[UUID_SIZE_BYTES * 2 + 1] = { 0 };
+    for (int i = 0; i < UUID_SIZE_BYTES; i++) {
+        sprintf(uuid_str + i * 2, "%02x", schedule_item_uuid[i]);
+    }
+    ESP_LOGI(TAG, "Requesting render for UUID: %s", uuid_str);
 
     // Check if a render request for this UUID is already pending
     if (is_render_request_pending(schedule_item_uuid)) {

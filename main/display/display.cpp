@@ -199,6 +199,9 @@ void prov_display_qr_helper(esp_qrcode_handle_t qrcode) {
     }
 
     display_raw_buffer(qr_display_buffer, get_display_buffer_size());
+    // Free the buffer after displaying
+    free(qr_display_buffer);
+    qr_display_buffer = NULL;
 }
 
 void prov_display_qr() {
@@ -209,8 +212,10 @@ void prov_display_qr() {
     };
 
     // Clean up any existing QR buffer
-    free(qr_display_buffer);
-    qr_display_buffer = NULL;
+    if (qr_display_buffer != NULL) {
+        free(qr_display_buffer);
+        qr_display_buffer = NULL;
+    }
 
     qr_display_buffer = (uint8_t*)heap_caps_calloc(get_display_buffer_size(), sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (qr_display_buffer == NULL) {
@@ -222,9 +227,13 @@ void prov_display_qr() {
     esp_err_t err = esp_qrcode_generate(&qr_config, kd_common_get_provisioning_qr_payload());
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "QR code generation failed");
-        free(qr_display_buffer);
-        qr_display_buffer = NULL;
+        if (qr_display_buffer != NULL) {
+            free(qr_display_buffer);
+            qr_display_buffer = NULL;
+        }
     }
+
+    // If QR generation succeeded, the display function will handle displaying the QR code
 }
 
 void wifi_prov_connected(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
@@ -273,7 +282,6 @@ void display_init() {
     };
 
     HUB75_I2S_CFG mxconfig(CONFIG_MATRIX_WIDTH, CONFIG_MATRIX_HEIGHT, 1, pins);
-    mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_20M; // Set I2S clock speed
 
 #if DISPLAY_ENABLED
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
@@ -345,7 +353,6 @@ void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
     dma_display->fillScreen(0);
 
     if (raw_buf_len != CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3) {
-        free(p_raw_buf);
         return;
     }
 
@@ -356,8 +363,6 @@ void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
         }
     }
 #endif
-
-    free(p_raw_buf);
 }
 
 void display_set_brightness(uint8_t brightness) {

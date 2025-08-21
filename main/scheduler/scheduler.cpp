@@ -170,6 +170,8 @@ void request_renders_for_upcoming_items() {
         }
         // Single item schedules: request rerender exactly 3 seconds before expiry
         else if (get_schedule_size() == 1 && current_display_time_remaining == 3) {
+            // Always request render for single item schedules, even if server-skipped
+            // This ensures server-skipped items get retried every display_time seconds
             request_render(schedule_items[current_schedule_item].uuid);
         }
         return;
@@ -332,10 +334,20 @@ void scheduler_task(void* pvParameter) {
                 continue;
             }
 
-            // Skip server-skipped items
+            // Handle server-skipped items
             if (schedule_items[next_item].flags.skipped_server) {
                 current_schedule_item = next_item;
-                current_display_time_remaining = 0; // Force immediate advance to next
+
+                // For single item schedules, wait display_time before retrying
+                if (get_schedule_size() == 1) {
+                    current_display_time_remaining = schedule_items[next_item].flags.display_time;
+                    // Request a new render for the skipped item
+                    request_render(schedule_items[next_item].uuid);
+                }
+                else {
+                    // For multi-item schedules, force immediate advance to next
+                    current_display_time_remaining = 0;
+                }
                 xSemaphoreGive(schedule_mutex);
                 continue;
             }
