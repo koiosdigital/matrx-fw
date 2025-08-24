@@ -16,6 +16,9 @@ ELSE()
     set(BUILD_VARIANT "devel")
 ENDIF()
 
+set(BUILD_VARIANT "matrx_v9_64x64")
+set(PROJECT_VER "0.9.7")
+
 message("Building version ${PROJECT_VER} for variant ${BUILD_VARIANT}")
 add_compile_definitions(FIRMWARE_VARIANT="${BUILD_VARIANT}")
 add_compile_definitions(ENABLE_OTA) #comment this line to disable OTA updates

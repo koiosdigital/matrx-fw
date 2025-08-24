@@ -17,6 +17,7 @@ typedef enum WebPTaskNotification_t {
 void display_init();
 esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len);
 void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len);
+void display_clear();
 size_t get_display_buffer_size();
 void get_display_dimensions(int* w, int* h);
 void display_clear_status_bar();

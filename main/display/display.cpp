@@ -365,6 +365,15 @@ void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
 #endif
 }
 
+void display_clear() {
+#if DISPLAY_ENABLED
+    if (dma_display != nullptr) {
+        destroy_decoder();
+        dma_display->fillScreenRGB888(0, 0, 0);
+    }
+#endif
+}
+
 void display_set_brightness(uint8_t brightness) {
 #if DISPLAY_ENABLED
     if (dma_display != nullptr) {
