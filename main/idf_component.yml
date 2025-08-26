@@ -5,3 +5,4 @@ dependencies:
     version: ">=5.5.0"
   espressif/esp_websocket_client: ^1.4.0
   espressif/qrcode: ^0.1.0~2
+  espressif/mdns: ^1.8.2

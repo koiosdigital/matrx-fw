@@ -14,6 +14,8 @@
 #include "sprites.h"
 #include "scheduler.h"
 #include "daughterboard.h"
+#include "config.h"
+#include "api.h"
 
 static const char* TAG = "main";
 
@@ -32,6 +34,15 @@ extern "C" void app_main(void)
 
     kd_common_set_provisioning_pop_token_format(ProvisioningPOPTokenFormat_t::NUMERIC_6);
     kd_common_init();
+
+    // Initialize config module after kd_common_init (which initializes NVS)
+    ret = config_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize config module: %s", esp_err_to_name(ret));
+    }
+
+    // Initialize API server
+    api_init();
 
     scheduler_init();
     sockets_init();

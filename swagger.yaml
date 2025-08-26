@@ -1,0 +1,249 @@
+openapi: 3.0.3
+info:
+  title: MATRX Device API
+  description: |
+    RESTful API for MATRX LED matrix device configuration and status.
+    
+    The MATRX device provides endpoints to:
+    - Get device information and firmware version
+    - Configure screen settings including brightness and auto-brightness
+    
+    ## Authentication
+    This API currently does not require authentication.
+    
+    ## Auto Brightness
+    When auto brightness is enabled, the device uses a light sensor to automatically:
+    - Turn the screen on when ambient light > 1 lux
+    - Turn the screen off when ambient light ≤ 1 lux
+    
+    When auto brightness is disabled, the screen uses the manual brightness setting.
+  version: 1.0.0
+  contact:
+    name: Koios Digital
+    url: https://koiosdigital.net
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://{device_ip}/api
+    description: MATRX Device API
+    variables:
+      device_ip:
+        default: 192.168.1.100
+        description: IP address of the MATRX device
+
+paths:
+  /about:
+    get:
+      summary: Get device information
+      description: Returns information about the MATRX device including model, type, and firmware version.
+      operationId: getDeviceInfo
+      tags:
+        - Device Information
+      responses:
+        '200':
+          description: Device information retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceInfo'
+              example:
+                model: "matrx_v9_64x32"
+                type: "matrx"
+                version: "1.0.0"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /system/config:
+    get:
+      summary: Get system configuration
+      description: Returns the current system configuration including screen settings.
+      operationId: getSystemConfig
+      tags:
+        - System Configuration
+      responses:
+        '200':
+          description: System configuration retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemConfig'
+              example:
+                screen_enabled: true
+                screen_brightness: 128
+                auto_brightness_enabled: false
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      summary: Update system configuration
+      description: |
+        Updates system configuration. Only provided fields will be updated - this allows for partial updates.
+        
+        **Note:** If auto_brightness_enabled is set to true, the screen_enabled state will be automatically 
+        controlled by the light sensor and manual screen_enabled changes may be overridden.
+      operationId: updateSystemConfig
+      tags:
+        - System Configuration
+      requestBody:
+        description: System configuration updates (partial updates supported)
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SystemConfigUpdate'
+            examples:
+              partial_update:
+                summary: Partial update example
+                description: Update only brightness and auto-brightness settings
+                value:
+                  screen_brightness: 200
+                  auto_brightness_enabled: true
+              full_update:
+                summary: Full update example
+                description: Update all configuration fields
+                value:
+                  screen_enabled: true
+                  screen_brightness: 180
+                  auto_brightness_enabled: false
+              brightness_only:
+                summary: Brightness only
+                description: Update only the screen brightness
+                value:
+                  screen_brightness: 255
+      responses:
+        '200':
+          description: System configuration updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemConfig'
+              example:
+                screen_enabled: true
+                screen_brightness: 200
+                auto_brightness_enabled: true
+        '400':
+          description: Bad request - Invalid JSON format or invalid field values
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Invalid JSON format"
+        '408':
+          description: Request timeout
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    DeviceInfo:
+      type: object
+      description: Information about the MATRX device
+      required:
+        - model
+        - type
+        - version
+      properties:
+        model:
+          type: string
+          description: Device model identifier
+          example: "matrx_v9_64x32"
+        type:
+          type: string
+          description: Device type
+          enum: ["matrx"]
+          example: "matrx"
+        version:
+          type: string
+          description: Firmware version
+          pattern: '^\d+\.\d+\.\d+.*$'
+          example: "1.0.0"
+
+    SystemConfig:
+      type: object
+      description: Complete system configuration
+      required:
+        - screen_enabled
+        - screen_brightness
+        - auto_brightness_enabled
+      properties:
+        screen_enabled:
+          type: boolean
+          description: |
+            Whether the screen is currently enabled.
+            When auto_brightness_enabled is true, this value is automatically controlled by the light sensor.
+          example: true
+        screen_brightness:
+          type: integer
+          description: Screen brightness level (0 = off, 255 = maximum brightness)
+          minimum: 0
+          maximum: 255
+          example: 128
+        auto_brightness_enabled:
+          type: boolean
+          description: |
+            Whether automatic brightness control is enabled.
+            When enabled, the device uses a light sensor to automatically turn the screen on/off:
+            - Screen on when ambient light > 1 lux
+            - Screen off when ambient light ≤ 1 lux
+          example: false
+
+    SystemConfigUpdate:
+      type: object
+      description: System configuration update request (partial updates supported)
+      properties:
+        screen_enabled:
+          type: boolean
+          description: |
+            Whether to enable the screen.
+            Note: If auto_brightness_enabled is true, this may be overridden by the light sensor.
+          example: true
+        screen_brightness:
+          type: integer
+          description: Screen brightness level (0 = off, 255 = maximum brightness)
+          minimum: 0
+          maximum: 255
+          example: 200
+        auto_brightness_enabled:
+          type: boolean
+          description: |
+            Whether to enable automatic brightness control.
+            When enabled, the screen will be automatically controlled by the light sensor.
+          example: true
+      additionalProperties: false
+
+    Error:
+      type: object
+      description: Error response
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: "Invalid JSON format"
+        code:
+          type: integer
+          description: HTTP status code
+          example: 400
+
+tags:
+  - name: Device Information
+    description: Device metadata and firmware information
+  - name: System Configuration
+    description: System settings and configuration management

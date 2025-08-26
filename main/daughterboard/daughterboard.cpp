@@ -21,7 +21,7 @@ static esp_timer_handle_t light_sensor_timer_handle = NULL;
 // VEML6030 register definitions
 #define VEML6030_REG_ALS_CONF   0x00
 #define VEML6030_REG_ALS_WH     0x01
-#define VEML6030_REG_ALS_WL     0x02
+#define VEML6030_REG_ALS_WL     0x02,
 #define VEML6030_REG_PSM        0x03
 #define VEML6030_REG_ALS        0x04
 #define VEML6030_REG_WHITE      0x05
@@ -178,14 +178,6 @@ static void light_sensor_timer_callback(void* arg) {
             0);
 
         ESP_LOGI(TAG, "Light reading: %u lux", lux);
-
-        //lux is 0,1 -> turn panel off
-        if (lux < 1) {
-            display_set_brightness(0);
-        }
-        else {
-            display_set_brightness(100);
-        }
     }
     else {
         ESP_LOGW(TAG, "Failed to read light sensor: %s", esp_err_to_name(ret));
