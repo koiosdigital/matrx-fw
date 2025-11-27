@@ -1,91 +1,15 @@
 # This is a esp idf workflow to build ESP32 based project
-name: Development build
+name: Development Build
 
 # Controls when the action will run.
 on:
   push:
-    branches:
-      - main
-    tags-ignore:
-      - "*"
-  pull_request:
+    branches: ["*"]
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  variants:
-    name: Generate build variants
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v2
-      - id: set-matrix
-        run: echo "matrix=$(cd variants && ls * | jq -R -s -c 'split("\n")[:-1]')" >> $GITHUB_OUTPUT
   build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
-
-    needs: variants
-    strategy:
-      # The build matrix defines the different configurations to run the job with
-      matrix:
-        config: ${{ fromJson(needs.variants.outputs.matrix) }}
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
-
-      - name: Handle SDKCONFIG overlay
-        run: |
-          awk 'FNR==NR { if ($0 ~ /^CONFIG_[A-Za-z0-9_]*=/) { split($0,a,"="); cfg[a[1]]=$0 } next } $0 ~ /^CONFIG_[A-Za-z0-9_]*=/ { key=substr($0,1,index($0,"=")-1); print (key in cfg ? cfg[key] : $0); next } 1; END { for (k in cfg) if (!seen[k]++) print cfg[k] }' variants/${{matrix.config}} sdkconfig > temp && mv temp sdkconfig
-
-      - name: Extract CONFIG_IDF_TARGET
-        run: |
-          IDF_TARGET=$(grep '^CONFIG_IDF_TARGET=' sdkconfig | cut -d'=' -f2)
-          echo "IDF_TARGET=${IDF_TARGET}" >> $GITHUB_ENV
-          mkdir output
-
-      - name: idf build
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          esp_idf_version: v5.4.1
-          extra_docker_args: -v ./output:/output
-          target: ${{ env.IDF_TARGET }}
-          command: |
-            export BUILD_VARIANT=${{ matrix.config }}
-
-            apt update -y
-            apt install -y protobuf-compiler protobuf-c-compiler
-
-            #build
-            idf.py build | tee build.log
-
-            FLASH_LINE=$(grep "python -m esptool" build.log | grep -v "@flash_args" | tail -n 1)
-
-            BINARY_INFO=$(grep -oP "^\S+\.bin binary size \S+ bytes" build.log | tail -n 1)
-            BINARY_FILE=$(echo "$BINARY_INFO" | sed -n "s/^\(\S\+\.bin\).*/\1/p")
-
-            # Extract binaries
-            BINARIES=$(echo "$FLASH_LINE" | sed -n "s/.*--flash_freq [^ ]\+ //p")
-
-            #merge artifacts
-            esptool.py --chip ${{ env.IDF_TARGET }} merge_bin -o factory_flash.bin --flash_mode keep --flash_size keep --flash_freq keep $BINARIES
-
-            #move artifacts
-            mv factory_flash.bin /output/merged.bin
-            mv build/$BINARY_FILE /output/app.bin
-
-      - name: Upload merged binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.config }}_merged.bin
-          path: output/merged.bin
-
-      - name: Upload OTA binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.config }}_app.bin
-          path: output/app.bin
+    uses: acvigue/.github/.github/workflows/idf_build.yaml@main
+    with:
+      idf_version: v5.5.1
+      project_name: MATRX
+      create_release: false
