@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 #include "sprites.h"
-#include "kd_matrx.pb-c.h"
+#include "kd/v1/matrx.pb-c.h"
 
 #define MAX_SCHEDULE_ITEMS 255
 #define UUID_SIZE_BYTES 16
@@ -30,7 +30,7 @@ void scheduler_init();
 bool scheduler_has_schedule();
 
 ScheduleItem_t* find_schedule_item(uint8_t* schedule_item_uuid);
-void scheduler_set_schedule(Kd__ScheduleResponse* schedule_response);
+void scheduler_set_schedule(Kd__V1__MatrxSchedule* schedule_response);
 
 void scheduler_skip_schedule_item(uint8_t* schedule_item_uuid);
 void scheduler_skip_current_schedule_item();

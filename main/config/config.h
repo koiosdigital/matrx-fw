@@ -13,21 +13,21 @@ extern "C" {
 #define NVS_CONFIG_SCREEN_ENABLE "screen_enable"
 #define NVS_CONFIG_SCREEN_BRIGHTNESS "screen_bright"
 #define NVS_CONFIG_AUTO_BRIGHTNESS "auto_bright"
+#define NVS_CONFIG_SCREEN_OFF_LUX "screen_off_lux"
 
     // System configuration structure
     typedef struct {
         bool screen_enabled;           // Screen enable state
         uint8_t screen_brightness;     // Manual screen brightness (0-255)
         bool auto_brightness_enabled;  // Auto brightness enable state
+        uint16_t screen_off_lux;       // Auto brightness: screen off when ambient light <= this lux value
     } system_config_t;
 
     // Default configuration values
 #define DEFAULT_SCREEN_ENABLED      true
 #define DEFAULT_SCREEN_BRIGHTNESS   128
 #define DEFAULT_AUTO_BRIGHTNESS     false
-
-// Auto brightness thresholds
-#define AUTO_BRIGHTNESS_LUX_THRESHOLD   1  // lux threshold for screen on/off
+#define DEFAULT_SCREEN_OFF_LUX      1
 
 /**
  * Initialize the config module
@@ -48,7 +48,7 @@ extern "C" {
      * Update specific system configuration fields (only provided fields are updated)
      */
     esp_err_t config_update_system_config(const system_config_t* config, bool update_screen_enabled,
-        bool update_brightness, bool update_auto_brightness);
+        bool update_brightness, bool update_auto_brightness, bool update_screen_off_lux);
 
     /**
      * Get screen enabled state
@@ -79,6 +79,16 @@ extern "C" {
      * Set auto brightness enabled state
      */
     esp_err_t config_set_auto_brightness_enabled(bool enabled);
+
+    /**
+     * Get auto brightness screen-off lux threshold
+     */
+    uint16_t config_get_screen_off_lux(void);
+
+    /**
+     * Set auto brightness screen-off lux threshold
+     */
+    esp_err_t config_set_screen_off_lux(uint16_t lux);
 
 #ifdef __cplusplus
 }

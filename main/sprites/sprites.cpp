@@ -52,23 +52,20 @@ RAMSprite_t* sprite_allocate() {
     return sprite;
 }
 
-void sprite_update_data(RAMSprite_t* sprite, uint8_t* data, size_t len) {
+void sprite_update_data(RAMSprite_t* sprite, const uint8_t* data, size_t len) {
     if (sprite == NULL) {
         ESP_LOGE(TAG, "invalid sprite pointer");
-        free(data); // Still free the input data
         return;
     }
 
     if (sprite->mutex == NULL) {
         ESP_LOGE(TAG, "sprite mutex is null");
-        free(data); // Still free the input data
         return;
     }
 
     // Take mutex to ensure exclusive access during data update
     if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) {
         ESP_LOGE(TAG, "failed to take sprite mutex");
-        free(data); // Still free the input data
         return;
     }
 
@@ -77,7 +74,6 @@ void sprite_update_data(RAMSprite_t* sprite, uint8_t* data, size_t len) {
         free(sprite->data);
         sprite->data = NULL;
         sprite->len = 0;
-        free(data); // Still free the input data
         xSemaphoreGive(sprite->mutex);
         return;
     }
@@ -87,7 +83,6 @@ void sprite_update_data(RAMSprite_t* sprite, uint8_t* data, size_t len) {
     if (sprite->data == NULL) {
         ESP_LOGE(TAG, "malloc failed: update sprite data");
         sprite->len = 0;
-        free(data); // Still free the input data on allocation failure
         xSemaphoreGive(sprite->mutex);
         return;
     }

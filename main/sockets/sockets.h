@@ -16,4 +16,7 @@ void upload_coredump(uint8_t* core_dump, size_t core_dump_len);
 void request_schedule();
 void attempt_coredump_upload();
 
+// Publish the current device configuration (protobuf-c) to the server.
+void sockets_send_device_config();
+
 #endif

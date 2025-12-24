@@ -15,7 +15,8 @@ static const char* TAG = "config";
 static system_config_t current_config = {
     .screen_enabled = DEFAULT_SCREEN_ENABLED,
     .screen_brightness = DEFAULT_SCREEN_BRIGHTNESS,
-    .auto_brightness_enabled = DEFAULT_AUTO_BRIGHTNESS
+    .auto_brightness_enabled = DEFAULT_AUTO_BRIGHTNESS,
+    .screen_off_lux = DEFAULT_SCREEN_OFF_LUX
 };
 
 // Mutex for thread-safe config access
@@ -58,10 +59,11 @@ esp_err_t config_init(void) {
     apply_display_settings();
 
     ESP_LOGI(TAG, "Config module initialized");
-    ESP_LOGI(TAG, "Screen enabled: %s, Brightness: %d, Auto brightness: %s",
+    ESP_LOGI(TAG, "Screen enabled: %s, Brightness: %d, Auto brightness: %s, Screen off lux: %u",
         current_config.screen_enabled ? "true" : "false",
         current_config.screen_brightness,
-        current_config.auto_brightness_enabled ? "true" : "false");
+        current_config.auto_brightness_enabled ? "true" : "false",
+        current_config.screen_off_lux);
 
     return ESP_OK;
 }
@@ -79,6 +81,7 @@ system_config_t config_get_system_config(void) {
         config.screen_enabled = DEFAULT_SCREEN_ENABLED;
         config.screen_brightness = DEFAULT_SCREEN_BRIGHTNESS;
         config.auto_brightness_enabled = DEFAULT_AUTO_BRIGHTNESS;
+        config.screen_off_lux = DEFAULT_SCREEN_OFF_LUX;
     }
 
     return config;
@@ -112,7 +115,7 @@ esp_err_t config_set_system_config(const system_config_t* config) {
 }
 
 esp_err_t config_update_system_config(const system_config_t* config, bool update_screen_enabled,
-    bool update_brightness, bool update_auto_brightness) {
+    bool update_brightness, bool update_auto_brightness, bool update_screen_off_lux) {
     if (config == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -132,6 +135,9 @@ esp_err_t config_update_system_config(const system_config_t* config, bool update
     if (update_auto_brightness) {
         current_config.auto_brightness_enabled = config->auto_brightness_enabled;
     }
+    if (update_screen_off_lux) {
+        current_config.screen_off_lux = config->screen_off_lux;
+    }
 
     // Save to NVS
     esp_err_t ret = save_config_to_nvs();
@@ -142,6 +148,34 @@ esp_err_t config_update_system_config(const system_config_t* config, bool update
         // Apply display settings
         apply_display_settings();
         ESP_LOGI(TAG, "System config updated (partial)");
+    }
+
+    return ret;
+}
+
+uint16_t config_get_screen_off_lux(void) {
+    uint16_t lux = DEFAULT_SCREEN_OFF_LUX;
+
+    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        lux = current_config.screen_off_lux;
+        xSemaphoreGive(config_mutex);
+    }
+
+    return lux;
+}
+
+esp_err_t config_set_screen_off_lux(uint16_t lux) {
+    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    current_config.screen_off_lux = lux;
+    esp_err_t ret = save_config_to_nvs();
+
+    xSemaphoreGive(config_mutex);
+
+    if (ret == ESP_OK) {
+        apply_display_settings();
     }
 
     return ret;
@@ -266,6 +300,13 @@ static esp_err_t load_config_from_nvs(void) {
         current_config.auto_brightness_enabled = (temp_uint8 != 0);
     }
 
+    // Load auto brightness screen off lux threshold
+    required_size = sizeof(uint16_t);
+    ret = nvs_get_blob(nvs_handle, NVS_CONFIG_SCREEN_OFF_LUX, &current_config.screen_off_lux, &required_size);
+    if (ret != ESP_OK) {
+        current_config.screen_off_lux = DEFAULT_SCREEN_OFF_LUX;
+    }
+
     nvs_close(nvs_handle);
     return ESP_OK;
 }
@@ -303,6 +344,13 @@ static esp_err_t save_config_to_nvs(void) {
         goto cleanup;
     }
 
+    // Save auto brightness screen off lux threshold
+    ret = nvs_set_blob(nvs_handle, NVS_CONFIG_SCREEN_OFF_LUX, &current_config.screen_off_lux, sizeof(uint16_t));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Error saving screen off lux: %s", esp_err_to_name(ret));
+        goto cleanup;
+    }
+
     // Commit changes
     ret = nvs_commit(nvs_handle);
     if (ret != ESP_OK) {
@@ -333,7 +381,8 @@ static void light_sensor_event_handler(void* handler_args, esp_event_base_t base
     ESP_LOGD(TAG, "Light sensor reading: %u lux", reading->lux);
 
     // Determine if screen should be enabled based on light level
-    bool should_enable_screen = (reading->lux > AUTO_BRIGHTNESS_LUX_THRESHOLD);
+    uint16_t screen_off_lux = config_get_screen_off_lux();
+    bool should_enable_screen = (reading->lux > screen_off_lux);
     bool current_screen_enabled = config_get_screen_enabled();
 
     if (should_enable_screen != current_screen_enabled) {

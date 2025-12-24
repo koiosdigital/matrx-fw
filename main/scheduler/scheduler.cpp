@@ -322,19 +322,17 @@ void scheduler_task(void* pvParameter) {
     }
 }
 
-void scheduler_set_schedule(Kd__ScheduleResponse* schedule_response) {
-    if (schedule_response->n_schedule_items == 0) {
+void scheduler_set_schedule(Kd__V1__MatrxSchedule* schedule_response) {
+    if (schedule_response == NULL || schedule_response->n_schedule_items == 0) {
         scheduler_clear();
         return;
     }
 
     xSemaphoreTake(schedule_mutex, portMAX_DELAY);
 
-    size_t n_schedule_items = schedule_response->n_schedule_items;
-    for (int i = 0; i < n_schedule_items; i++) {
-        Kd__ScheduleItem* item = schedule_response->schedule_items[i];
-
-        if (item->uuid.len != UUID_SIZE_BYTES) {
+    for (int i = 0; i < (int)schedule_response->n_schedule_items; i++) {
+        Kd__V1__ScheduleItem* item = schedule_response->schedule_items[i];
+        if (item == NULL || item->uuid.len != UUID_SIZE_BYTES || item->uuid.data == NULL) {
             continue;
         }
 
@@ -346,7 +344,6 @@ void scheduler_set_schedule(Kd__ScheduleResponse* schedule_response) {
         schedule_item->flags.skipped_server = false;
         schedule_item->flags.skipped_user = item->skipped;
         schedule_item->flags.display_time = item->display_time;
-
         // Preserve existing sprite if item already exists
         if (matched_item != NULL) {
             schedule_item->sprite = matched_item->sprite;
@@ -360,7 +357,7 @@ void scheduler_set_schedule(Kd__ScheduleResponse* schedule_response) {
     }
 
     // Clear unused slots
-    for (int i = n_schedule_items; i < MAX_SCHEDULE_ITEMS; i++) {
+    for (int i = (int)schedule_response->n_schedule_items; i < MAX_SCHEDULE_ITEMS; i++) {
         if (schedule_items[i].sprite != NULL) {
             sprite_free(schedule_items[i].sprite);
         }
@@ -411,7 +408,7 @@ void scheduler_set_schedule(Kd__ScheduleResponse* schedule_response) {
         }
     }
 
-    ESP_LOGI(TAG, "Schedule updated with %d items, starting with item %d", n_schedule_items, current_schedule_item);
+    ESP_LOGI(TAG, "Schedule updated with %d items, starting with item %d", schedule_response->n_schedule_items, current_schedule_item);
     xSemaphoreGive(schedule_mutex);
 }
 

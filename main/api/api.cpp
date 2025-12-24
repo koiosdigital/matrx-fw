@@ -11,6 +11,7 @@
 
 #include "static_files.h"
 #include "config.h"
+#include "sockets.h"
 
 /* Empty handle to esp_http_server */
 httpd_handle_t kd_server = NULL;
@@ -99,10 +100,12 @@ esp_err_t system_config_get_handler(httpd_req_t* req) {
     cJSON* screen_enabled = cJSON_CreateBool(system_config.screen_enabled);
     cJSON* screen_brightness = cJSON_CreateNumber(system_config.screen_brightness);
     cJSON* auto_brightness_enabled = cJSON_CreateBool(system_config.auto_brightness_enabled);
+    cJSON* screen_off_lux = cJSON_CreateNumber(system_config.screen_off_lux);
 
     cJSON_AddItemToObject(json, "screen_enabled", screen_enabled);
     cJSON_AddItemToObject(json, "screen_brightness", screen_brightness);
     cJSON_AddItemToObject(json, "auto_brightness_enabled", auto_brightness_enabled);
+    cJSON_AddItemToObject(json, "screen_off_lux", screen_off_lux);
 
     char* json_string = cJSON_Print(json);
     if (json_string == NULL) {
@@ -148,11 +151,13 @@ esp_err_t system_config_post_handler(httpd_req_t* req) {
     cJSON* screen_enabled_json = cJSON_GetObjectItem(json, "screen_enabled");
     cJSON* screen_brightness_json = cJSON_GetObjectItem(json, "screen_brightness");
     cJSON* auto_brightness_enabled_json = cJSON_GetObjectItem(json, "auto_brightness_enabled");
+    cJSON* screen_off_lux_json = cJSON_GetObjectItem(json, "screen_off_lux");
 
     // Track which system config fields need updating
     bool update_screen_enabled = false;
     bool update_brightness = false;
     bool update_auto_brightness = false;
+    bool update_screen_off_lux = false;
 
     // Validate screen_enabled if present
     if (cJSON_IsBool(screen_enabled_json)) {
@@ -175,18 +180,31 @@ esp_err_t system_config_post_handler(httpd_req_t* req) {
         update_auto_brightness = true;
     }
 
+    // Validate screen_off_lux if present
+    if (cJSON_IsNumber(screen_off_lux_json)) {
+        double lux_val = cJSON_GetNumberValue(screen_off_lux_json);
+        if (lux_val >= 0 && lux_val <= 65535) {
+            new_system_config.screen_off_lux = (uint16_t)lux_val;
+            update_screen_off_lux = true;
+        }
+    }
+
     cJSON_Delete(json);
 
     // Update system configuration (only update fields that were provided)
-    if (update_screen_enabled || update_brightness || update_auto_brightness) {
+    if (update_screen_enabled || update_brightness || update_auto_brightness || update_screen_off_lux) {
         esp_err_t config_ret = config_update_system_config(&new_system_config,
             update_screen_enabled,
             update_brightness,
-            update_auto_brightness);
+            update_auto_brightness,
+            update_screen_off_lux);
         if (config_ret != ESP_OK) {
             httpd_resp_send_500(req);
             return ESP_FAIL;
         }
+
+        // Push the updated config to the server over protobuf/WebSocket
+        sockets_send_device_config();
     }
 
     // Create response with the complete current configuration
@@ -202,6 +220,7 @@ esp_err_t system_config_post_handler(httpd_req_t* req) {
     cJSON_AddItemToObject(response_json, "screen_enabled", cJSON_CreateBool(current_system_config.screen_enabled));
     cJSON_AddItemToObject(response_json, "screen_brightness", cJSON_CreateNumber(current_system_config.screen_brightness));
     cJSON_AddItemToObject(response_json, "auto_brightness_enabled", cJSON_CreateBool(current_system_config.auto_brightness_enabled));
+    cJSON_AddItemToObject(response_json, "screen_off_lux", cJSON_CreateNumber(current_system_config.screen_off_lux));
 
     char* response_string = cJSON_Print(response_json);
     if (response_string == NULL) {

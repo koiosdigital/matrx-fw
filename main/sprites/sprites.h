@@ -13,7 +13,7 @@ typedef struct RAMSprite_t {
 } RAMSprite_t;
 
 RAMSprite_t* sprite_allocate();
-void sprite_update_data(RAMSprite_t* sprite, uint8_t* data, size_t len);
+void sprite_update_data(RAMSprite_t* sprite, const uint8_t* data, size_t len);
 void sprite_free(RAMSprite_t* sprite);
 void sprites_cleanup(); // Clean up global sprite buffers
 

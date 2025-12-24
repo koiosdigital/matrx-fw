@@ -180,6 +180,10 @@ void IRAM_ATTR decoder_task(void* pvParameter) {
 
 uint8_t* qr_display_buffer = NULL;
 void prov_display_qr_helper(esp_qrcode_handle_t qrcode) {
+    if (qr_display_buffer == NULL) {
+        return;
+    }
+
     //We want to center the QR code on the display
     int qr_size = esp_qrcode_get_size(qrcode);
     int w, h = 0;
@@ -189,11 +193,22 @@ void prov_display_qr_helper(esp_qrcode_handle_t qrcode) {
     int y_offset = (h - qr_size) / 2;
 
     for (int y = 0; y < qr_size; y++) {
+        int dst_y = y + y_offset;
+        if (dst_y < 0 || dst_y >= h) {
+            continue;
+        }
+
         for (int x = 0; x < qr_size; x++) {
+            int dst_x = x + x_offset;
+            if (dst_x < 0 || dst_x >= w) {
+                continue;
+            }
+
             if (esp_qrcode_get_module(qrcode, x, y)) {
-                qr_display_buffer[((y + y_offset) * w + (x + x_offset)) * 3] = 255;
-                qr_display_buffer[((y + y_offset) * w + (x + x_offset)) * 3 + 1] = 255;
-                qr_display_buffer[((y + y_offset) * w + (x + x_offset)) * 3 + 2] = 255;
+                size_t idx = ((size_t)dst_y * (size_t)w + (size_t)dst_x) * 3;
+                qr_display_buffer[idx] = 255;
+                qr_display_buffer[idx + 1] = 255;
+                qr_display_buffer[idx + 2] = 255;
             }
         }
     }
@@ -244,8 +259,18 @@ void wifi_prov_started(void* arg, esp_event_base_t event_base, int32_t event_id,
     show_fs_sprite("ble_prov");
 }
 
+void wifi_prov_ended(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    wifi_config_t wifi_cfg;
+    if (esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg) != ESP_OK) {
+        return;
+    }
+
+    if (strlen((const char*)wifi_cfg.sta.ssid) != 0) {
+        show_fs_sprite("connect");
+    }
+}
+
 void provisioning_event_handler2(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    static int wifiConnectionAttempts = 0;
     if (event_base == WIFI_EVENT) {
         switch (event_id) {
         case WIFI_EVENT_STA_START: {
@@ -298,6 +323,7 @@ void display_init() {
     //Display QR code once connected to endpoint device
     esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, PROTOCOMM_TRANSPORT_BLE_CONNECTED, &wifi_prov_connected, NULL);
     esp_event_handler_register(WIFI_PROV_EVENT, WIFI_PROV_START, &wifi_prov_started, NULL);
+    esp_event_handler_register(WIFI_PROV_EVENT, WIFI_PROV_END, &wifi_prov_ended, NULL);
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START, &provisioning_event_handler2, NULL);
 
     show_fs_sprite("boot");

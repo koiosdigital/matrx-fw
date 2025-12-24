@@ -15,14 +15,12 @@
 #include "display.h"
 #include "scheduler.h"
 #include "sprites.h"
+#include "config.h"
 
-#include "kd_matrx.pb-c.h"
-#include "kd_global.pb-c.h"
-#include "device-api.pb-c.h"
+#include "kd/v1/matrx.pb-c.h"
 
 #include "cJSON.h"
 #include <esp_partition.h>
-#include <mbedtls/base64.h>
 
 static const char* TAG = "sockets";
 TaskHandle_t xSocketsTask = NULL;
@@ -52,6 +50,12 @@ static int64_t last_websocket_activity_ms = 0;
 // WiFi connectivity state - tracks if we can connect to WebSocket
 static bool connectable = false;
 
+// Claim flow state
+static bool server_needs_claimed = false;
+static int64_t last_claim_attempt_ms = 0;
+static constexpr int64_t CLAIM_RETRY_INTERVAL_MS = 5000;
+static constexpr size_t CLAIM_TOKEN_MAX_LEN = 2048;
+
 // Socket connection error tracking
 static uint32_t socket_connection_error_count = 0;
 #define MAX_SOCKET_CONNECTION_ERRORS 5
@@ -62,11 +66,56 @@ typedef enum SocketTaskNotification_t {
     SOCKET_TASK_RECONNECT = 2,
 } SocketTaskNotification_t;
 
-void send_socket_message(Kd__DeviceAPIMessage* message);
+void send_socket_message(const Kd__V1__MatrxMessage* message);
 
 // Forward declarations for internal functions
 static esp_err_t socket_init();
 static void socket_deinit();
+
+static void attempt_device_claim_if_possible() {
+    if (!server_needs_claimed) {
+        return;
+    }
+
+    if (!connectable) {
+        return;
+    }
+
+    if (client == NULL || !esp_websocket_client_is_connected(client)) {
+        return;
+    }
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (last_claim_attempt_ms > 0 && (now_ms - last_claim_attempt_ms) < CLAIM_RETRY_INTERVAL_MS) {
+        return;
+    }
+
+    size_t token_len = CLAIM_TOKEN_MAX_LEN;
+    uint8_t* token = (uint8_t*)heap_caps_malloc(CLAIM_TOKEN_MAX_LEN, MALLOC_CAP_SPIRAM);
+    if (token == NULL) {
+        ESP_LOGE(TAG, "no mem for claim token");
+        return;
+    }
+
+    esp_err_t err = kd_common_get_claim_token((char*)token, &token_len);
+    if (err != ESP_OK || token_len == 0) {
+        free(token);
+        return;
+    }
+
+    Kd__V1__ClaimDevice claim = KD__V1__CLAIM_DEVICE__INIT;
+    claim.claim_token.data = token;
+    claim.claim_token.len = token_len;
+
+    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
+    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_CLAIM_DEVICE;
+    message.claim_device = &claim;
+
+    send_socket_message(&message);
+    last_claim_attempt_ms = now_ms;
+
+    free(token);
+}
 
 // Helper functions for tracking render requests
 static void cleanup_expired_render_requests() {
@@ -281,7 +330,7 @@ static esp_err_t socket_init() {
     // Initialize certificate data if not already done
     if (static_cert == NULL) {
         static_ds_data_ctx = kd_common_crypto_get_ctx();
-        static_cert = (char*)calloc(4096, sizeof(char));
+        static_cert = (char*)heap_caps_calloc(4096, sizeof(char), MALLOC_CAP_SPIRAM);
         if (static_cert == NULL) {
             ESP_LOGE(TAG, "Failed to allocate certificate buffer");
             return ESP_ERR_NO_MEM;
@@ -347,27 +396,26 @@ static void socket_deinit() {
 
 // Helper function to send actual render request
 static void send_render_request_internal(uint8_t* schedule_item_uuid) {
-    Kd__RequestRender request = KD__REQUEST_RENDER__INIT;
-    request.uuid.data = schedule_item_uuid;
-    request.uuid.len = UUID_SIZE_BYTES;
+    if (schedule_item_uuid == NULL) {
+        return;
+    }
 
-    request.width = CONFIG_MATRIX_WIDTH;
-    request.height = CONFIG_MATRIX_HEIGHT;
+    Kd__V1__SpriteRenderRequest request = KD__V1__SPRITE_RENDER_REQUEST__INIT;
+    request.sprite_uuid.data = schedule_item_uuid;
+    request.sprite_uuid.len = UUID_SIZE_BYTES;
+    request.device_width = CONFIG_MATRIX_WIDTH;
+    request.device_height = CONFIG_MATRIX_HEIGHT;
 
-    Kd__KDMatrxMessage message = KD__KDMATRX_MESSAGE__INIT;
-    message.message_case = KD__KDMATRX_MESSAGE__MESSAGE_REQUEST_RENDER;
-    message.request_render = &request;
+    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
+    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_SPRITE_RENDER_REQUEST;
+    message.sprite_render_request = &request;
 
-    Kd__DeviceAPIMessage device_message = KD__DEVICE_APIMESSAGE__INIT;
-    device_message.message_case = KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE;
-    device_message.kd_matrx_message = &message;
-
-    send_socket_message(&device_message);
+    send_socket_message(&message);
 }
 
-void handle_schedule_response(Kd__ScheduleResponse* response)
+void handle_schedule_response(Kd__V1__MatrxSchedule* response)
 {
-    if (response->n_schedule_items == 0) {
+    if (response == NULL || response->n_schedule_items == 0) {
         scheduler_clear();
         return;
     }
@@ -376,18 +424,22 @@ void handle_schedule_response(Kd__ScheduleResponse* response)
     scheduler_start();
 }
 
-void handle_render_response(Kd__RenderResponse* response)
+void handle_render_response(Kd__V1__MatrxSpriteData* response)
 {
     // Remove from pending requests tracking as we received a response
-    remove_pending_render_request(response->uuid.data);
+    if (response == NULL || response->sprite_uuid.data == NULL || response->sprite_uuid.len != UUID_SIZE_BYTES) {
+        return;
+    }
 
-    ScheduleItem_t* item = find_schedule_item(response->uuid.data);
+    remove_pending_render_request(response->sprite_uuid.data);
+
+    ScheduleItem_t* item = find_schedule_item(response->sprite_uuid.data);
     if (item == NULL) {
         ESP_LOGE(TAG, "failed to find schedule item");
         return;
     }
 
-    if (response->render_error == true) {
+    if (response->error == true) {
         item->flags.skipped_server = true;
         return;
     }
@@ -396,37 +448,95 @@ void handle_render_response(Kd__RenderResponse* response)
     sprite_update_data(item->sprite, response->sprite_data.data, response->sprite_data.len);
 }
 
-void handle_modify_schedule_item(Kd__ModifyScheduleItem* modify)
+void handle_modify_schedule_item(Kd__V1__ModifyScheduleItem* modify)
 {
 
 }
 
-void handle_global_message(Kd__KDGlobalMessage* message) {
-    switch (message->message_case) {
-    case KD__KDGLOBAL_MESSAGE__MESSAGE_JOIN_RESPONSE:
-        break;
-    default:
-        break;
+static void send_device_config_internal(void) {
+    system_config_t cfg = config_get_system_config();
+
+    Kd__V1__DeviceConfig device_config = KD__V1__DEVICE_CONFIG__INIT;
+    device_config.screen_enabled = cfg.screen_enabled;
+    device_config.screen_brightness = cfg.screen_brightness;
+    device_config.auto_brightness_enabled = cfg.auto_brightness_enabled;
+    device_config.screen_off_lux = cfg.screen_off_lux;
+
+    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
+    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_DEVICE_CONFIG;
+    message.device_config = &device_config;
+
+    send_socket_message(&message);
+}
+
+static void apply_device_config(const Kd__V1__DeviceConfig* device_config) {
+    if (device_config == NULL) {
+        return;
     }
+
+    system_config_t new_cfg = config_get_system_config();
+    new_cfg.screen_enabled = device_config->screen_enabled;
+    if (device_config->screen_brightness <= 255) {
+        new_cfg.screen_brightness = (uint8_t)device_config->screen_brightness;
+    }
+    new_cfg.auto_brightness_enabled = device_config->auto_brightness_enabled;
+    if (device_config->screen_off_lux <= 65535) {
+        new_cfg.screen_off_lux = (uint16_t)device_config->screen_off_lux;
+    }
+
+    (void)config_update_system_config(&new_cfg,
+        true,
+        true,
+        true,
+        true);
 }
 
-void handle_matrx_message(Kd__KDMatrxMessage* message)
+void handle_matrx_message(Kd__V1__MatrxMessage* message)
 {
+    if (message == NULL) {
+        return;
+    }
+
     switch (message->message_case) {
-    case KD__KDMATRX_MESSAGE__MESSAGE_SCHEDULE_RESPONSE:
-        handle_schedule_response(message->schedule_response);
+    case KD__V1__MATRX_MESSAGE__MESSAGE_SCHEDULE:
+        handle_schedule_response(message->schedule);
         break;
-    case KD__KDMATRX_MESSAGE__MESSAGE_RENDER_RESPONSE:
-        handle_render_response(message->render_response);
+    case KD__V1__MATRX_MESSAGE__MESSAGE_SPRITE_DATA:
+        handle_render_response(message->sprite_data);
         break;
-    case KD__KDMATRX_MESSAGE__MESSAGE_MODIFY_SCHEDULE_ITEM:
+    case KD__V1__MATRX_MESSAGE__MESSAGE_MODIFY_SCHEDULE_ITEM:
         handle_modify_schedule_item(message->modify_schedule_item);
         break;
+    case KD__V1__MATRX_MESSAGE__MESSAGE_DEVICE_CONFIG_REQUEST:
+        send_device_config_internal();
+        break;
+    case KD__V1__MATRX_MESSAGE__MESSAGE_DEVICE_CONFIG:
+        apply_device_config(message->device_config);
+        break;
+    case KD__V1__MATRX_MESSAGE__MESSAGE_JOIN_RESPONSE: {
+        if (message->join_response == NULL) {
+            break;
+        }
+
+        // Prefer needs_claimed when present (newer servers). Fallback to is_claimed for older servers.
+        const bool needs_claimed = message->join_response->needs_claimed || !message->join_response->is_claimed;
+        server_needs_claimed = needs_claimed;
+
+        if (!needs_claimed) {
+            (void)kd_common_clear_claim_token();
+        }
+        else {
+            attempt_device_claim_if_possible();
+        }
+        break;
+    }
     default:
         break;
     }
+}
 
-    // Don't free the message here - it's freed by the caller along with the parent device_message
+void sockets_send_device_config() {
+    send_device_config_internal();
 }
 
 void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
@@ -606,25 +716,16 @@ void sockets_task(void* pvParameter)
                 continue;
             }
 
-            Kd__DeviceAPIMessage* device_message = kd__device_apimessage__unpack(NULL, message.message_len, (uint8_t*)message.message);
-            if (device_message == NULL) {
-                ESP_LOGE(TAG, "failed to unpack device message");
+            Kd__V1__MatrxMessage* matrx_message = kd__v1__matrx_message__unpack(NULL, message.message_len, (const uint8_t*)message.message);
+            if (matrx_message == NULL) {
+                ESP_LOGE(TAG, "failed to unpack matrx message");
                 free(message.message);
                 continue;
             }
 
-            switch (device_message->message_case) {
-            case KD__DEVICE_APIMESSAGE__MESSAGE_KD_GLOBAL_MESSAGE:
-                handle_global_message(device_message->kd_global_message);
-                break;
-            case KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE:
-                handle_matrx_message(device_message->kd_matrx_message);
-                break;
-            default:
-                break;
-            }
+            handle_matrx_message(matrx_message);
 
-            kd__device_apimessage__free_unpacked(device_message, NULL);
+            kd__v1__matrx_message__free_unpacked(matrx_message, NULL);
             free(message.message);
         }
 
@@ -633,6 +734,9 @@ void sockets_task(void* pvParameter)
         if (current_time - last_cleanup_time >= pdMS_TO_TICKS(5000)) {
             cleanup_expired_render_requests();
             last_cleanup_time = current_time;
+
+            // If the server indicates we need to be claimed, periodically retry.
+            attempt_device_claim_if_possible();
 
             int64_t current_time_ms = esp_timer_get_time() / 1000;
 
@@ -671,7 +775,7 @@ void sockets_init()
         return;
     }
 
-    BaseType_t ret = xTaskCreatePinnedToCore(sockets_task, "sockets", 8192, NULL, 5, &xSocketsTask, 1);
+    BaseType_t ret = xTaskCreatePinnedToCore(sockets_task, "sockets", 16384, NULL, 5, &xSocketsTask, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create sockets task");
         return;
@@ -750,7 +854,7 @@ void sockets_disconnect()
     }
 }
 
-void send_socket_message(Kd__DeviceAPIMessage* message)
+void send_socket_message(const Kd__V1__MatrxMessage* message)
 {
     if (!connectable) {
         return;
@@ -760,14 +864,20 @@ void send_socket_message(Kd__DeviceAPIMessage* message)
         return;
     }
 
-    size_t len = kd__device_apimessage__get_packed_size(message);
+    if (message == NULL) {
+        return;
+    }
+
+    size_t len = kd__v1__matrx_message__get_packed_size(message);
+
     uint8_t* buffer = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (buffer == NULL) {
         ESP_LOGE(TAG, "failed to allocate message buffer");
         return;
     }
 
-    kd__device_apimessage__pack(message, buffer);
+    kd__v1__matrx_message__pack(message, buffer);
+
     ProcessableMessage_t p_message;
     p_message.message = (char*)buffer;
     p_message.message_len = len;
@@ -788,7 +898,7 @@ void request_render(uint8_t* schedule_item_uuid) {
 
     char uuid_str[UUID_SIZE_BYTES * 2 + 1] = { 0 };
     for (int i = 0; i < UUID_SIZE_BYTES; i++) {
-        sprintf(uuid_str + i * 2, "%02x", schedule_item_uuid[i]);
+        (void)snprintf(uuid_str + i * 2, sizeof(uuid_str) - (size_t)(i * 2), "%02x", schedule_item_uuid[i]);
     }
     ESP_LOGI(TAG, "Requesting render for UUID: %s", uuid_str);
 
@@ -807,33 +917,30 @@ void request_render(uint8_t* schedule_item_uuid) {
 }
 
 void upload_coredump(uint8_t* core_dump, size_t core_dump_len) {
-    Kd__UploadCoreDump upload = KD__UPLOAD_CORE_DUMP__INIT;
+    if (core_dump == NULL || core_dump_len == 0) {
+        ESP_LOGE(TAG, "upload_coredump called with empty buffer");
+        return;
+    }
+
+    Kd__V1__UploadCoreDump upload = KD__V1__UPLOAD_CORE_DUMP__INIT;
     upload.core_dump.data = core_dump;
     upload.core_dump.len = core_dump_len;
 
-    Kd__KDGlobalMessage message = KD__KDGLOBAL_MESSAGE__INIT;
-    message.message_case = KD__KDGLOBAL_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
+    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
+    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
     message.upload_core_dump = &upload;
 
-    Kd__DeviceAPIMessage device_message = KD__DEVICE_APIMESSAGE__INIT;
-    device_message.message_case = KD__DEVICE_APIMESSAGE__MESSAGE_KD_GLOBAL_MESSAGE;
-    device_message.kd_global_message = &message;
-
-    send_socket_message(&device_message);
+    send_socket_message(&message);
 }
 
 void request_schedule() {
-    Kd__RequestSchedule request = KD__REQUEST_SCHEDULE__INIT;
+    Kd__V1__ScheduleRequest request = KD__V1__SCHEDULE_REQUEST__INIT;
 
-    Kd__KDMatrxMessage message = KD__KDMATRX_MESSAGE__INIT;
-    message.message_case = KD__KDMATRX_MESSAGE__MESSAGE_REQUEST_SCHEDULE;
-    message.request_schedule = &request;
+    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
+    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_SCHEDULE_REQUEST;
+    message.schedule_request = &request;
 
-    Kd__DeviceAPIMessage device_message = KD__DEVICE_APIMESSAGE__INIT;
-    device_message.message_case = KD__DEVICE_APIMESSAGE__MESSAGE_KD_MATRX_MESSAGE;
-    device_message.kd_matrx_message = &message;
-
-    send_socket_message(&device_message);
+    send_socket_message(&message);
 }
 
 void attempt_coredump_upload() {
@@ -849,8 +956,6 @@ void attempt_coredump_upload() {
     // Read the core dump size
     size_t core_dump_size = core_dump_partition->size;
 
-    size_t encoded_size = 0;
-    uint8_t* encoded_data = 0;
     bool is_erased = true;
 
     uint8_t* core_dump_data = (uint8_t*)heap_caps_malloc(core_dump_size + 1, MALLOC_CAP_SPIRAM); // used as return, so freed in calling function
@@ -880,23 +985,7 @@ void attempt_coredump_upload() {
         goto exit;
     }
 
-    // Calculate Base64 encoded size
-    mbedtls_base64_encode(NULL, 0, &encoded_size, core_dump_data, core_dump_size);
-    encoded_data = (uint8_t*)malloc(encoded_size + 1); // used as return, so freed in calling function
-    if (!encoded_data)
-    {
-        ESP_LOGE(TAG, "Failed to allocate memory for encoded data");
-        goto exit;
-    }
-
-    // Encode core dump to Base64
-    if (mbedtls_base64_encode(encoded_data, encoded_size, &encoded_size, core_dump_data, core_dump_size) != 0)
-    {
-        goto exit;
-    }
-
-    encoded_data[encoded_size] = '\0'; // Null-terminate the Base64 string
-    upload_coredump(encoded_data, encoded_size);
+    upload_coredump(core_dump_data, core_dump_size);
 
     //clear the coredump partition
     if (esp_partition_erase_range(core_dump_partition, 0, core_dump_size) != ESP_OK)
@@ -906,5 +995,4 @@ void attempt_coredump_upload() {
 
 exit:
     free(core_dump_data);
-    free(encoded_data);
 }

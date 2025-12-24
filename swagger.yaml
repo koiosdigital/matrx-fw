@@ -3,19 +3,19 @@ info:
   title: MATRX Device API
   description: |
     RESTful API for MATRX LED matrix device configuration and status.
-    
+
     The MATRX device provides endpoints to:
     - Get device information and firmware version
     - Configure screen settings including brightness and auto-brightness
-    
+
     ## Authentication
     This API currently does not require authentication.
-    
+
     ## Auto Brightness
     When auto brightness is enabled, the device uses a light sensor to automatically:
     - Turn the screen on when ambient light > 1 lux
     - Turn the screen off when ambient light ≤ 1 lux
-    
+
     When auto brightness is disabled, the screen uses the manual brightness setting.
   version: 1.0.0
   contact:
@@ -41,22 +41,22 @@ paths:
       tags:
         - Device Information
       responses:
-        '200':
+        "200":
           description: Device information retrieved successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeviceInfo'
+                $ref: "#/components/schemas/DeviceInfo"
               example:
                 model: "matrx_v9_64x32"
                 type: "matrx"
                 version: "1.0.0"
-        '500':
+        "500":
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: "#/components/schemas/Error"
 
   /system/config:
     get:
@@ -66,28 +66,29 @@ paths:
       tags:
         - System Configuration
       responses:
-        '200':
+        "200":
           description: System configuration retrieved successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SystemConfig'
+                $ref: "#/components/schemas/SystemConfig"
               example:
                 screen_enabled: true
                 screen_brightness: 128
                 auto_brightness_enabled: false
-        '500':
+                screen_off_lux: 1
+        "500":
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: "#/components/schemas/Error"
 
     post:
       summary: Update system configuration
       description: |
         Updates system configuration. Only provided fields will be updated - this allows for partial updates.
-        
+
         **Note:** If auto_brightness_enabled is set to true, the screen_enabled state will be automatically 
         controlled by the light sensor and manual screen_enabled changes may be overridden.
       operationId: updateSystemConfig
@@ -99,7 +100,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SystemConfigUpdate'
+              $ref: "#/components/schemas/SystemConfigUpdate"
             examples:
               partial_update:
                 summary: Partial update example
@@ -120,36 +121,37 @@ paths:
                 value:
                   screen_brightness: 255
       responses:
-        '200':
+        "200":
           description: System configuration updated successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SystemConfig'
+                $ref: "#/components/schemas/SystemConfig"
               example:
                 screen_enabled: true
                 screen_brightness: 200
                 auto_brightness_enabled: true
-        '400':
+                screen_off_lux: 1
+        "400":
           description: Bad request - Invalid JSON format or invalid field values
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: "#/components/schemas/Error"
               example:
                 error: "Invalid JSON format"
-        '408':
+        "408":
           description: Request timeout
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
-        '500':
+                $ref: "#/components/schemas/Error"
+        "500":
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: "#/components/schemas/Error"
 
 components:
   schemas:
@@ -183,6 +185,7 @@ components:
         - screen_enabled
         - screen_brightness
         - auto_brightness_enabled
+        - screen_off_lux
       properties:
         screen_enabled:
           type: boolean
@@ -201,9 +204,18 @@ components:
           description: |
             Whether automatic brightness control is enabled.
             When enabled, the device uses a light sensor to automatically turn the screen on/off:
-            - Screen on when ambient light > 1 lux
-            - Screen off when ambient light ≤ 1 lux
+            - Screen on when ambient light > screen_off_lux
+            - Screen off when ambient light ≤ screen_off_lux
           example: false
+
+        screen_off_lux:
+          type: integer
+          description: |
+            Auto brightness threshold in lux.
+            When auto_brightness_enabled is true, the screen will turn off at or below this lux value.
+          minimum: 0
+          maximum: 65535
+          example: 1
 
     SystemConfigUpdate:
       type: object
@@ -227,6 +239,15 @@ components:
             Whether to enable automatic brightness control.
             When enabled, the screen will be automatically controlled by the light sensor.
           example: true
+
+        screen_off_lux:
+          type: integer
+          description: |
+            Auto brightness threshold in lux.
+            Screen off when ambient light ≤ screen_off_lux.
+          minimum: 0
+          maximum: 65535
+          example: 1
       additionalProperties: false
 
     Error:
