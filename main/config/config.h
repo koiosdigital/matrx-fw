@@ -90,6 +90,11 @@ extern "C" {
      */
     esp_err_t config_set_screen_off_lux(uint16_t lux);
 
+    /**
+     * Reset configuration to default values
+     */
+    esp_err_t config_reset_to_defaults(void);
+
 #ifdef __cplusplus
 }
 #endif

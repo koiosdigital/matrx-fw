@@ -178,85 +178,104 @@ void IRAM_ATTR decoder_task(void* pvParameter) {
     }
 }
 
-uint8_t* qr_display_buffer = NULL;
-void prov_display_qr_helper(esp_qrcode_handle_t qrcode) {
-    if (qr_display_buffer == NULL) {
+// Simple 5x7 monospaced font for digits 1-6
+static const uint8_t font_5x7[][7] = {
+    {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}, // 0
+    {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}, // 1
+    {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}, // 2
+    {0x0E, 0x11, 0x01, 0x0E, 0x01, 0x11, 0x0E}, // 3
+    {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}, // 4
+    {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}, // 5
+    {0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E}, // 6
+};
+
+void draw_char_scaled(uint8_t* buffer, int buf_width, int buf_height, char c, int x, int y, int scale, uint8_t r, uint8_t g, uint8_t b) {
+    if (c < '0' || c > '6') {
+        return; // Only support digits 0-6
+    }
+
+    int char_index = c - '0';
+    const uint8_t* char_data = font_5x7[char_index];
+
+    for (int row = 0; row < 7; row++) {
+        uint8_t row_data = char_data[row];
+        for (int col = 0; col < 5; col++) {
+            if (row_data & (1 << (4 - col))) {
+                // Draw scaled pixel
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        int px = x + col * scale + sx;
+                        int py = y + row * scale + sy;
+                        if (px >= 0 && px < buf_width && py >= 0 && py < buf_height) {
+                            size_t idx = ((size_t)py * (size_t)buf_width + (size_t)px) * 3;
+                            buffer[idx] = r;
+                            buffer[idx + 1] = g;
+                            buffer[idx + 2] = b;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void prov_display_pop_code() {
+    char* pop_token = kd_common_provisioning_get_pop_token();
+    if (pop_token == NULL) {
+        ESP_LOGE(TAG, "POP token is NULL");
         return;
     }
 
-    //We want to center the QR code on the display
-    int qr_size = esp_qrcode_get_size(qrcode);
-    int w, h = 0;
+    int w, h;
     get_display_dimensions(&w, &h);
 
-    int x_offset = (w - qr_size) / 2;
-    int y_offset = (h - qr_size) / 2;
-
-    for (int y = 0; y < qr_size; y++) {
-        int dst_y = y + y_offset;
-        if (dst_y < 0 || dst_y >= h) {
-            continue;
-        }
-
-        for (int x = 0; x < qr_size; x++) {
-            int dst_x = x + x_offset;
-            if (dst_x < 0 || dst_x >= w) {
-                continue;
-            }
-
-            if (esp_qrcode_get_module(qrcode, x, y)) {
-                size_t idx = ((size_t)dst_y * (size_t)w + (size_t)dst_x) * 3;
-                qr_display_buffer[idx] = 255;
-                qr_display_buffer[idx + 1] = 255;
-                qr_display_buffer[idx + 2] = 255;
-            }
-        }
-    }
-
-    display_raw_buffer(qr_display_buffer, get_display_buffer_size());
-    // Free the buffer after displaying
-    free(qr_display_buffer);
-    qr_display_buffer = NULL;
-}
-
-void prov_display_qr() {
-    esp_qrcode_config_t qr_config = {
-        .display_func = prov_display_qr_helper,
-        .max_qrcode_version = 40,
-        .qrcode_ecc_level = ESP_QRCODE_ECC_MED,
-    };
-
-    // Clean up any existing QR buffer
-    if (qr_display_buffer != NULL) {
-        free(qr_display_buffer);
-        qr_display_buffer = NULL;
-    }
-
-    qr_display_buffer = (uint8_t*)heap_caps_calloc(get_display_buffer_size(), sizeof(uint8_t), MALLOC_CAP_SPIRAM);
-    if (qr_display_buffer == NULL) {
+    uint8_t* display_buffer = (uint8_t*)heap_caps_calloc(get_display_buffer_size(), sizeof(uint8_t), MALLOC_CAP_SPIRAM);
+    if (display_buffer == NULL) {
         ESP_LOGE(TAG, "malloc failed: display buffer");
         return;
     }
-    memset(qr_display_buffer, 0, get_display_buffer_size());
+    memset(display_buffer, 0, get_display_buffer_size());
 
-    esp_err_t err = esp_qrcode_generate(&qr_config, kd_common_get_provisioning_qr_payload());
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "QR code generation failed");
-        if (qr_display_buffer != NULL) {
-            free(qr_display_buffer);
-            qr_display_buffer = NULL;
-        }
+    // Calculate optimal scale and positioning for 6 digits on 64x32 display with padding
+    // Scale 1: 6 chars * 5px + 5 gaps * 2px = 40px width, leaving 12px padding on each side
+    // Height: 7px tall, centered in 32px height with 12-13px padding top/bottom
+    int token_len = strlen(pop_token);
+    int scale = 1; // 1x scale provides good padding
+    int char_width = 5 * scale;
+    int char_height = 7 * scale;
+    int spacing = 2; // 2px gap between characters for readability
+
+    int total_width = token_len * char_width + (token_len - 1) * spacing;
+    int x_start = (w - total_width) / 2;
+    int y_start = (h - char_height) / 2;
+
+    // Draw each character
+    for (int i = 0; i < token_len; i++) {
+        int x = x_start + i * (char_width + spacing);
+        draw_char_scaled(display_buffer, w, h, pop_token[i], x, y_start, scale, 255, 255, 255);
     }
 
-    // If QR generation succeeded, the display function will handle displaying the QR code
+    display_raw_buffer(display_buffer, get_display_buffer_size());
+    free(display_buffer);
+
+    ESP_LOGI(TAG, "Displaying POP code: %s", pop_token);
 }
 
 void wifi_prov_connected(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    prov_display_qr();
+    prov_display_pop_code();
+}
+
+void wifi_prov_disconnected(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    // If BLE disconnects while provisioning is still active and we're not connected to WiFi,
+    // show the setup sprite again
+    if (!kd_common_is_wifi_connected()) {
+        ESP_LOGI(TAG, "BLE disconnected during provisioning, showing setup sprite");
+        show_fs_sprite("setup");
+    }
 }
 
 void wifi_prov_started(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    show_fs_sprite("ble_prov");
+    show_fs_sprite("setup");
 }
 
 void wifi_prov_ended(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
@@ -266,7 +285,7 @@ void wifi_prov_ended(void* arg, esp_event_base_t event_base, int32_t event_id, v
     }
 
     if (strlen((const char*)wifi_cfg.sta.ssid) != 0) {
-        show_fs_sprite("connect");
+        show_fs_sprite("connecting_wifi");
     }
 }
 
@@ -278,7 +297,7 @@ void provisioning_event_handler2(void* arg, esp_event_base_t event_base, int32_t
             esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg);
 
             if (strlen((const char*)wifi_cfg.sta.ssid) != 0) {
-                show_fs_sprite("connect");
+                show_fs_sprite("connecting_wifi");
                 break;
             }
             break;
@@ -322,6 +341,7 @@ void display_init() {
 
     //Display QR code once connected to endpoint device
     esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, PROTOCOMM_TRANSPORT_BLE_CONNECTED, &wifi_prov_connected, NULL);
+    esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, PROTOCOMM_TRANSPORT_BLE_DISCONNECTED, &wifi_prov_disconnected, NULL);
     esp_event_handler_register(WIFI_PROV_EVENT, WIFI_PROV_START, &wifi_prov_started, NULL);
     esp_event_handler_register(WIFI_PROV_EVENT, WIFI_PROV_END, &wifi_prov_ended, NULL);
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START, &provisioning_event_handler2, NULL);

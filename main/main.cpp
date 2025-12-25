@@ -6,6 +6,8 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 #include "esp_event.h"
+#include "nvs_flash.h"
+#include "esp_system.h"
 
 #include "kd_common.h"
 
@@ -33,7 +35,58 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Failed to initialize daughterboard: %s", esp_err_to_name(ret));
     }
 
+    // Check if factory reset buttons are pressed (handle before kd_common_init)
+    bool factory_reset_requested = daughterboard_is_button_pressed(0) && daughterboard_is_button_pressed(2);
+
+    // Handle factory reset BEFORE kd_common_init
+    if (factory_reset_requested) {
+        ESP_LOGI(TAG, "Factory reset buttons detected, showing hold sprite");
+        show_fs_sprite("factory_reset_hold");
+
+        // Initialize NVS manually before factory reset
+        ret = nvs_flash_init();
+        if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            nvs_flash_erase();
+            ret = nvs_flash_init();
+        }
+
+        // Wait for 3 seconds while buttons are held
+        int hold_duration_ms = 0;
+        const int required_hold_ms = 3000;
+        const int check_interval_ms = 100;
+
+        while (hold_duration_ms < required_hold_ms) {
+            if (!daughterboard_is_button_pressed(0) || !daughterboard_is_button_pressed(2)) {
+                ESP_LOGI(TAG, "Buttons released before 3 seconds, restarting");
+                vTaskDelay(pdMS_TO_TICKS(100));
+                esp_restart();
+            }
+            vTaskDelay(pdMS_TO_TICKS(check_interval_ms));
+            hold_duration_ms += check_interval_ms;
+        }
+
+        // If held for full duration, perform factory reset
+        ESP_LOGI(TAG, "Factory reset triggered!");
+
+        // Erase all NVS partitions
+        nvs_flash_erase();
+
+        show_fs_sprite("factory_reset_success");
+
+        // Wait 2 seconds on reset ok screen, then restart
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
+
     kd_common_set_provisioning_pop_token_format(ProvisioningPOPTokenFormat_t::NUMERIC_6);
+
+    // Show keygen sprite if key generation will occur
+    #ifndef KD_COMMON_CRYPTO_DISABLE
+    if (kd_common_crypto_will_generate_key()) {
+        show_fs_sprite("keygen");
+    }
+    #endif
+
     kd_common_init();
 
     ESP_LOGI(TAG, "post kdc Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());

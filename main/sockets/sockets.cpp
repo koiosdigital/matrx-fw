@@ -268,7 +268,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
         }
         // Clear all pending render requests since websocket is disconnected
         clear_all_pending_render_requests();
-        show_fs_sprite("connect");
+        show_fs_sprite("connecting_cloud");
         if (xSocketsTask != NULL) {
             xTaskNotify(xSocketsTask, SOCKET_TASK_RECONNECT, eSetValueWithOverwrite);
         }
@@ -432,6 +432,8 @@ void handle_schedule_response(Kd__V1__MatrxSchedule* response)
     ESP_LOGD(TAG, "Handling schedule response");
     if (response == NULL || response->n_schedule_items == 0) {
         scheduler_clear();
+        // Show ready sprite instead of clearing display when schedule is empty
+        show_fs_sprite("ready");
         return;
     }
 
@@ -588,8 +590,37 @@ void sockets_task(void* pvParameter)
         break;
     }
 
+    // Register event handlers early so we don't miss the IP event
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL);
+
+    // Check if WiFi is already connected (in case IP event already fired)
+    if (kd_common_is_wifi_connected()) {
+        connectable = true;
+        socket_connection_error_count = 0;
+    }
+
+    // Wait for OTA boot check to complete before attempting socket connection
+    #ifdef ENABLE_OTA
+    // Show check_updates sprite while waiting for update check
+    bool shown_check_updates = false;
+    while (1) {
+        if (kd_common_ota_has_completed_boot_check()) {
+            break;
+        }
+        // Show check_updates sprite if WiFi is connected and we haven't shown it yet
+        if (connectable && !shown_check_updates) {
+            show_fs_sprite("check_updates");
+            shown_check_updates = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    // After update check completes, show connecting_cloud sprite
+    if (connectable) {
+        show_fs_sprite("connecting_cloud");
+    }
+    #endif
 
     // Initialize activity timestamp
     last_websocket_activity_ms = esp_timer_get_time() / 1000;

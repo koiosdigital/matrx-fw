@@ -409,3 +409,36 @@ static void apply_display_settings(void) {
         ESP_LOGD(TAG, "Applied display settings: disabled");
     }
 }
+
+esp_err_t config_reset_to_defaults(void) {
+    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    // Reset to default values
+    current_config.screen_enabled = DEFAULT_SCREEN_ENABLED;
+    current_config.screen_brightness = DEFAULT_SCREEN_BRIGHTNESS;
+    current_config.auto_brightness_enabled = DEFAULT_AUTO_BRIGHTNESS;
+    current_config.screen_off_lux = DEFAULT_SCREEN_OFF_LUX;
+
+    // Erase the NVS namespace to clear all saved values
+    nvs_handle_t nvs_handle;
+    esp_err_t ret = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (ret == ESP_OK) {
+        nvs_erase_all(nvs_handle);
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+    }
+
+    // Save default config to NVS
+    ret = save_config_to_nvs();
+
+    xSemaphoreGive(config_mutex);
+
+    if (ret == ESP_OK) {
+        apply_display_settings();
+        ESP_LOGI(TAG, "Config reset to defaults");
+    }
+
+    return ret;
+}
