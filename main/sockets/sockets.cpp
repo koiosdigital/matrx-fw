@@ -227,6 +227,20 @@ static void cleanup_static_cert_data() {
     }
 }
 
+static void disconnect_wifi_after_max_errors(const char* context) {
+    ESP_LOGE(TAG, "Maximum socket connection errors reached (%d) during %s, disconnecting WiFi...",
+        MAX_SOCKET_CONNECTION_ERRORS,
+        context);
+    connectable = false;
+
+    esp_err_t err = esp_wifi_disconnect();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT && err != ESP_ERR_WIFI_NOT_STARTED) {
+        ESP_LOGW(TAG, "Failed to disconnect WiFi: %s", esp_err_to_name(err));
+    }
+
+    socket_connection_error_count = 0;
+}
+
 typedef struct ProcessableMessage_t {
     char* message;
     size_t message_len;
@@ -271,7 +285,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
         if (connectable) {
             socket_connection_error_count++;
             if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
-                esp_restart();
+                disconnect_wifi_after_max_errors("websocket error event");
             }
         }
 
@@ -350,12 +364,12 @@ static esp_err_t socket_init() {
     }
 
     esp_websocket_client_config_t websocket_cfg = {
-        .uri = SOCKETS_URI,
-        .port = 443,
-        .client_cert = static_cert,
-        .client_cert_len = static_cert_len + 1,
-        .client_ds_data = static_ds_data_ctx,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .uri = "ws://192.168.0.215",
+        .port = 9091,
+        //.client_cert = static_cert,
+        //.client_cert_len = static_cert_len + 1,
+        //.client_ds_data = static_ds_data_ctx,
+        //.crt_bundle_attach = esp_crt_bundle_attach,
         .reconnect_timeout_ms = 1000,      // Faster initial reconnect attempts  
         .network_timeout_ms = 5000,        // Shorter timeout to fail fast and retry
         .ping_interval_sec = 10,           // Keep connection alive with pings
@@ -415,6 +429,7 @@ static void send_render_request_internal(uint8_t* schedule_item_uuid) {
 
 void handle_schedule_response(Kd__V1__MatrxSchedule* response)
 {
+    ESP_LOGD(TAG, "Handling schedule response");
     if (response == NULL || response->n_schedule_items == 0) {
         scheduler_clear();
         return;
@@ -431,6 +446,7 @@ void handle_render_response(Kd__V1__MatrxSpriteData* response)
         return;
     }
 
+    ESP_LOGD(TAG, "Handling render response for UUID");
     remove_pending_render_request(response->sprite_uuid.data);
 
     ScheduleItem_t* item = find_schedule_item(response->sprite_uuid.data);
@@ -441,9 +457,11 @@ void handle_render_response(Kd__V1__MatrxSpriteData* response)
 
     if (response->error == true) {
         item->flags.skipped_server = true;
+        ESP_LOGD(TAG, "Server indicated error rendering sprite, marking as skipped by server");
         return;
     }
 
+    ESP_LOGD(TAG, "Marking schedule item as not skipped by server");
     item->flags.skipped_server = false;
     sprite_update_data(item->sprite, response->sprite_data.data, response->sprite_data.len);
 }
@@ -593,8 +611,7 @@ void sockets_task(void* pvParameter)
                 ESP_LOGW(TAG, "Socket init error, connection error count: %lu/%d", socket_connection_error_count, MAX_SOCKET_CONNECTION_ERRORS);
 
                 if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
-                    ESP_LOGE(TAG, "Maximum socket connection errors reached (%d), restarting ESP32...", MAX_SOCKET_CONNECTION_ERRORS);
-                    esp_restart();
+                    disconnect_wifi_after_max_errors("socket init");
                 }
             }
 
@@ -636,8 +653,7 @@ void sockets_task(void* pvParameter)
                             ESP_LOGW(TAG, "Socket reinit error, connection error count: %lu/%d", socket_connection_error_count, MAX_SOCKET_CONNECTION_ERRORS);
 
                             if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
-                                ESP_LOGE(TAG, "Maximum socket connection errors reached (%d), restarting ESP32...", MAX_SOCKET_CONNECTION_ERRORS);
-                                esp_restart();
+                                disconnect_wifi_after_max_errors("socket reinit");
                             }
                         }
 
@@ -675,8 +691,7 @@ void sockets_task(void* pvParameter)
                                 ESP_LOGW(TAG, "Socket reconnect init error, connection error count: %lu/%d", socket_connection_error_count, MAX_SOCKET_CONNECTION_ERRORS);
 
                                 if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
-                                    ESP_LOGE(TAG, "Maximum socket connection errors reached (%d), restarting ESP32...", MAX_SOCKET_CONNECTION_ERRORS);
-                                    esp_restart();
+                                    disconnect_wifi_after_max_errors("socket reconnect init");
                                 }
                             }
 
@@ -718,6 +733,7 @@ void sockets_task(void* pvParameter)
 
             Kd__V1__MatrxMessage* matrx_message = kd__v1__matrx_message__unpack(NULL, message.message_len, (const uint8_t*)message.message);
             if (matrx_message == NULL) {
+                ESP_LOG_BUFFER_HEXDUMP(TAG, message.message, message.message_len, ESP_LOG_ERROR);
                 ESP_LOGE(TAG, "failed to unpack matrx message");
                 free(message.message);
                 continue;
@@ -834,8 +850,7 @@ void sockets_connect()
             ESP_LOGW(TAG, "Socket connection error count: %lu/%d", socket_connection_error_count, MAX_SOCKET_CONNECTION_ERRORS);
 
             if (socket_connection_error_count >= MAX_SOCKET_CONNECTION_ERRORS) {
-                ESP_LOGE(TAG, "Maximum socket connection errors reached (%d), restarting ESP32...", MAX_SOCKET_CONNECTION_ERRORS);
-                esp_restart();
+                disconnect_wifi_after_max_errors("websocket start");
             }
         }
     }

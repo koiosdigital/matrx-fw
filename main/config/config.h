@@ -25,7 +25,7 @@ extern "C" {
 
     // Default configuration values
 #define DEFAULT_SCREEN_ENABLED      true
-#define DEFAULT_SCREEN_BRIGHTNESS   128
+#define DEFAULT_SCREEN_BRIGHTNESS   255
 #define DEFAULT_AUTO_BRIGHTNESS     false
 #define DEFAULT_SCREEN_OFF_LUX      1
 

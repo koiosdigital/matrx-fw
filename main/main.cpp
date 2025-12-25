@@ -15,7 +15,6 @@
 #include "scheduler.h"
 #include "daughterboard.h"
 #include "config.h"
-#include "api.h"
 
 static const char* TAG = "main";
 
@@ -44,11 +43,6 @@ extern "C" void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize config module: %s", esp_err_to_name(ret));
     }
-
-    // Initialize API server
-    api_init();
-
-    ESP_LOGI(TAG, "post api Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
 
     scheduler_init();
 
