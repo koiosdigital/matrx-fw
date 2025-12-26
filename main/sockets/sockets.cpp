@@ -29,19 +29,10 @@ QueueHandle_t xSocketsQueue = NULL;
 esp_websocket_client_handle_t client = NULL;
 
 #define UUID_SIZE_BYTES 16
-#define RENDER_REQUEST_TIMEOUT_MS 5000
-#define MAX_PENDING_RENDER_REQUESTS 10
 
-// Structure to track pending render requests
-typedef struct PendingRenderRequest_t {
-    uint8_t uuid[UUID_SIZE_BYTES];
-    int64_t timestamp_ms;
-    bool in_use;
-} PendingRenderRequest_t;
-
-// Array to track pending render requests
-static PendingRenderRequest_t pending_render_requests[MAX_PENDING_RENDER_REQUESTS] = { 0 };
-static SemaphoreHandle_t render_requests_mutex = NULL;
+// Simple last request tracking to prevent immediate duplicates
+static uint8_t last_render_request_uuid[UUID_SIZE_BYTES] = { 0 };
+static bool has_last_render_request = false;
 
 // Connection watchdog - track last activity to detect stale connections
 static int64_t last_websocket_activity_ms = 0;
@@ -118,98 +109,41 @@ static void attempt_device_claim_if_possible() {
 }
 
 // Helper functions for tracking render requests
-static void cleanup_expired_render_requests() {
-    if (render_requests_mutex == NULL) return;
-
-    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
-
-    int64_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
-
-    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
-        if (pending_render_requests[i].in_use) {
-            if (current_time - pending_render_requests[i].timestamp_ms >= RENDER_REQUEST_TIMEOUT_MS) {
-                pending_render_requests[i].in_use = false;
-                memset(pending_render_requests[i].uuid, 0, UUID_SIZE_BYTES);
-            }
-        }
+static bool is_duplicate_render_request(uint8_t* uuid) {
+    if (uuid == NULL) {
+        return false;
     }
 
-    xSemaphoreGive(render_requests_mutex);
+    if (!has_last_render_request) {
+        return false;
+    }
+
+    return memcmp(last_render_request_uuid, uuid, UUID_SIZE_BYTES) == 0;
 }
 
-static bool is_render_request_pending(uint8_t* uuid) {
-    if (render_requests_mutex == NULL || uuid == NULL) return false;
-
-    cleanup_expired_render_requests();
-
-    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
-
-    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
-        if (pending_render_requests[i].in_use &&
-            memcmp(pending_render_requests[i].uuid, uuid, UUID_SIZE_BYTES) == 0) {
-            xSemaphoreGive(render_requests_mutex);
-            return true;
-        }
+static void track_render_request(uint8_t* uuid) {
+    if (uuid == NULL) {
+        return;
     }
 
-    xSemaphoreGive(render_requests_mutex);
-    return false;
+    memcpy(last_render_request_uuid, uuid, UUID_SIZE_BYTES);
+    has_last_render_request = true;
 }
 
-static bool add_pending_render_request(uint8_t* uuid) {
-    if (render_requests_mutex == NULL || uuid == NULL) return false;
-
-    cleanup_expired_render_requests();
-
-    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
-
-    // Find an empty slot
-    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
-        if (!pending_render_requests[i].in_use) {
-            memcpy(pending_render_requests[i].uuid, uuid, UUID_SIZE_BYTES);
-            pending_render_requests[i].timestamp_ms = esp_timer_get_time() / 1000;
-            pending_render_requests[i].in_use = true;
-
-            xSemaphoreGive(render_requests_mutex);
-            ESP_LOGD(TAG, "Added pending render request for UUID");
-            return true;
-        }
+static void clear_render_request_tracking(uint8_t* uuid) {
+    if (uuid == NULL) {
+        return;
     }
 
-    xSemaphoreGive(render_requests_mutex);
-    ESP_LOGW(TAG, "No space for new render request, max pending requests reached");
-    return false;
+    if (has_last_render_request && memcmp(last_render_request_uuid, uuid, UUID_SIZE_BYTES) == 0) {
+        has_last_render_request = false;
+        memset(last_render_request_uuid, 0, UUID_SIZE_BYTES);
+    }
 }
 
-static void remove_pending_render_request(uint8_t* uuid) {
-    if (render_requests_mutex == NULL || uuid == NULL) return;
-
-    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
-
-    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
-        if (pending_render_requests[i].in_use &&
-            memcmp(pending_render_requests[i].uuid, uuid, UUID_SIZE_BYTES) == 0) {
-            pending_render_requests[i].in_use = false;
-            memset(pending_render_requests[i].uuid, 0, UUID_SIZE_BYTES);
-            ESP_LOGD(TAG, "Removed pending render request for UUID");
-            break;
-        }
-    }
-
-    xSemaphoreGive(render_requests_mutex);
-}
-
-static void clear_all_pending_render_requests() {
-    if (render_requests_mutex == NULL) return;
-
-    xSemaphoreTake(render_requests_mutex, portMAX_DELAY);
-
-    for (int i = 0; i < MAX_PENDING_RENDER_REQUESTS; i++) {
-        pending_render_requests[i].in_use = false;
-        memset(pending_render_requests[i].uuid, 0, UUID_SIZE_BYTES);
-    }
-
-    xSemaphoreGive(render_requests_mutex);
+static void reset_render_request_tracking() {
+    has_last_render_request = false;
+    memset(last_render_request_uuid, 0, UUID_SIZE_BYTES);
 }
 
 // Static variables for certificate handling - initialized once and reused
@@ -266,8 +200,8 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
             free(dbuf);
             dbuf = NULL;
         }
-        // Clear all pending render requests since websocket is disconnected
-        clear_all_pending_render_requests();
+        // Reset render request tracking since websocket is disconnected
+        reset_render_request_tracking();
         show_fs_sprite("connecting_cloud");
         if (xSocketsTask != NULL) {
             xTaskNotify(xSocketsTask, SOCKET_TASK_RECONNECT, eSetValueWithOverwrite);
@@ -279,7 +213,7 @@ static void websocket_event_handler(void* handler_args, esp_event_base_t base, i
             free(dbuf);
             dbuf = NULL;
         }
-        clear_all_pending_render_requests();
+        reset_render_request_tracking();
 
         // Count websocket errors when WiFi is connected
         if (connectable) {
@@ -360,7 +294,7 @@ static esp_err_t socket_init() {
         }
     }
     else {
-        ESP_LOGD(TAG, "Using cached certificate data");
+        ESP_LOGV(TAG, "Using cached certificate data");
     }
 
     esp_websocket_client_config_t websocket_cfg = {
@@ -393,7 +327,7 @@ static esp_err_t socket_init() {
 
 // Websocket deinitialization function
 static void socket_deinit() {
-    ESP_LOGI(TAG, "Deinitializing websocket client");
+    ESP_LOGD(TAG, "Deinitializing websocket client");
 
     if (client != NULL) {
         // Stop the client first
@@ -403,8 +337,8 @@ static void socket_deinit() {
         esp_websocket_client_destroy(client);
         client = NULL;
 
-        // Clear all pending render requests
-        clear_all_pending_render_requests();
+        // Reset render request tracking
+        reset_render_request_tracking();
     }
 }
 
@@ -429,7 +363,7 @@ static void send_render_request_internal(uint8_t* schedule_item_uuid) {
 
 void handle_schedule_response(Kd__V1__MatrxSchedule* response)
 {
-    ESP_LOGD(TAG, "Handling schedule response");
+    ESP_LOGV(TAG, "Handling schedule response");
     if (response == NULL || response->n_schedule_items == 0) {
         scheduler_clear();
         // Show ready sprite instead of clearing display when schedule is empty
@@ -448,8 +382,8 @@ void handle_render_response(Kd__V1__MatrxSpriteData* response)
         return;
     }
 
-    ESP_LOGD(TAG, "Handling render response for UUID");
-    remove_pending_render_request(response->sprite_uuid.data);
+    ESP_LOGV(TAG, "Handling render response for UUID");
+    clear_render_request_tracking(response->sprite_uuid.data);
 
     ScheduleItem_t* item = find_schedule_item(response->sprite_uuid.data);
     if (item == NULL) {
@@ -459,11 +393,11 @@ void handle_render_response(Kd__V1__MatrxSpriteData* response)
 
     if (response->error == true) {
         item->flags.skipped_server = true;
-        ESP_LOGD(TAG, "Server indicated error rendering sprite, marking as skipped by server");
+        ESP_LOGV(TAG, "Server indicated error rendering sprite, marking as skipped by server");
         return;
     }
 
-    ESP_LOGD(TAG, "Marking schedule item as not skipped by server");
+    ESP_LOGV(TAG, "Marking schedule item as not skipped by server");
     item->flags.skipped_server = false;
     sprite_update_data(item->sprite, response->sprite_data.data, response->sprite_data.len);
 }
@@ -538,6 +472,9 @@ void handle_matrx_message(Kd__V1__MatrxMessage* message)
             break;
         }
 
+        // Send device info to server on join
+        sockets_send_device_info();
+
         // Prefer needs_claimed when present (newer servers). Fallback to is_claimed for older servers.
         const bool needs_claimed = message->join_response->needs_claimed || !message->join_response->is_claimed;
         server_needs_claimed = needs_claimed;
@@ -601,8 +538,8 @@ void sockets_task(void* pvParameter)
     }
 
     // Wait for OTA boot check to complete before attempting socket connection
-    #ifdef ENABLE_OTA
-    // Show check_updates sprite while waiting for update check
+#ifdef ENABLE_OTA
+// Show check_updates sprite while waiting for update check
     bool shown_check_updates = false;
     while (1) {
         if (kd_common_ota_has_completed_boot_check()) {
@@ -620,7 +557,7 @@ void sockets_task(void* pvParameter)
     if (connectable) {
         show_fs_sprite("connecting_cloud");
     }
-    #endif
+#endif
 
     // Initialize activity timestamp
     last_websocket_activity_ms = esp_timer_get_time() / 1000;
@@ -779,7 +716,6 @@ void sockets_task(void* pvParameter)
         // Periodic cleanup and aggressive connection monitoring (every 5 seconds)
         TickType_t current_time = xTaskGetTickCount();
         if (current_time - last_cleanup_time >= pdMS_TO_TICKS(5000)) {
-            cleanup_expired_render_requests();
             last_cleanup_time = current_time;
 
             // If the server indicates we need to be claimed, periodically retry.
@@ -787,7 +723,6 @@ void sockets_task(void* pvParameter)
 
             int64_t current_time_ms = esp_timer_get_time() / 1000;
 
-            // NEVER GIVE UP - Proactive connection monitoring and recovery!
             if (client != NULL && esp_websocket_client_is_connected(client)) {
                 // Check for connection watchdog timeout
                 if (last_websocket_activity_ms > 0 &&
@@ -815,14 +750,7 @@ void sockets_init()
         return;
     }
 
-    // Initialize mutex for tracking render requests
-    render_requests_mutex = xSemaphoreCreateMutex();
-    if (render_requests_mutex == NULL) {
-        ESP_LOGE(TAG, "Failed to create render requests mutex");
-        return;
-    }
-
-    BaseType_t ret = xTaskCreatePinnedToCore(sockets_task, "sockets", 16384, NULL, 5, &xSocketsTask, 1);
+    BaseType_t ret = xTaskCreatePinnedToCore(sockets_task, "sockets", 12288, NULL, 5, &xSocketsTask, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create sockets task");
         return;
@@ -852,11 +780,8 @@ void sockets_deinit()
         xSocketsQueue = NULL;
     }
 
-    // Delete mutex
-    if (render_requests_mutex != NULL) {
-        vSemaphoreDelete(render_requests_mutex);
-        render_requests_mutex = NULL;
-    }
+    // Reset render request tracking
+    reset_render_request_tracking();
 }
 
 void sockets_connect()
@@ -946,18 +871,16 @@ void request_render(uint8_t* schedule_item_uuid) {
     for (int i = 0; i < UUID_SIZE_BYTES; i++) {
         (void)snprintf(uuid_str + i * 2, sizeof(uuid_str) - (size_t)(i * 2), "%02x", schedule_item_uuid[i]);
     }
-    ESP_LOGI(TAG, "Requesting render for UUID: %s", uuid_str);
+    ESP_LOGD(TAG, "Requesting render for UUID: %s", uuid_str);
 
-    // Check if a render request for this UUID is already pending
-    if (is_render_request_pending(schedule_item_uuid)) {
-        ESP_LOGD(TAG, "Render request already pending for UUID, skipping duplicate");
+    // Check if this is a duplicate of the last request
+    if (is_duplicate_render_request(schedule_item_uuid)) {
+        ESP_LOGV(TAG, "Duplicate render request detected, skipping");
         return;
     }
 
-    // Add to pending requests tracking
-    if (!add_pending_render_request(schedule_item_uuid)) {
-        ESP_LOGW(TAG, "Failed to add render request to pending list, sending anyway");
-    }
+    // Track this request
+    track_render_request(schedule_item_uuid);
 
     send_render_request_internal(schedule_item_uuid);
 }
@@ -985,6 +908,35 @@ void request_schedule() {
     Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
     message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_SCHEDULE_REQUEST;
     message.schedule_request = &request;
+
+    send_socket_message(&message);
+}
+
+void sockets_send_currently_displaying(uint8_t* uuid) {
+    if (uuid == NULL) {
+        return;
+    }
+
+    Kd__V1__CurrentlyDisplayingUpdate update = KD__V1__CURRENTLY_DISPLAYING_UPDATE__INIT;
+    update.installation_uuid.data = uuid;
+    update.installation_uuid.len = UUID_SIZE_BYTES;
+
+    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
+    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_CURRENTLY_DISPLAYING_UPDATE;
+    message.currently_displaying_update = &update;
+
+    send_socket_message(&message);
+}
+
+void sockets_send_device_info() {
+    Kd__V1__DeviceInfo info = KD__V1__DEVICE_INFO__INIT;
+    info.width = CONFIG_MATRIX_WIDTH;
+    info.height = CONFIG_MATRIX_HEIGHT;
+    info.has_light_sensor = true;
+
+    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
+    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_DEVICE_INFO;
+    message.device_info = &info;
 
     send_socket_message(&message);
 }

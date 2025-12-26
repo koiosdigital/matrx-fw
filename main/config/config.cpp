@@ -58,8 +58,8 @@ esp_err_t config_init(void) {
     // Apply initial display settings
     apply_display_settings();
 
-    ESP_LOGI(TAG, "Config module initialized");
-    ESP_LOGI(TAG, "Screen enabled: %s, Brightness: %d, Auto brightness: %s, Screen off lux: %u",
+    ESP_LOGD(TAG, "Config module initialized");
+    ESP_LOGD(TAG, "Screen enabled: %s, Brightness: %d, Auto brightness: %s, Screen off lux: %u",
         current_config.screen_enabled ? "true" : "false",
         current_config.screen_brightness,
         current_config.auto_brightness_enabled ? "true" : "false",
@@ -108,7 +108,7 @@ esp_err_t config_set_system_config(const system_config_t* config) {
     if (ret == ESP_OK) {
         // Apply display settings
         apply_display_settings();
-        ESP_LOGI(TAG, "System config updated");
+        ESP_LOGD(TAG, "System config updated");
     }
 
     return ret;
@@ -147,123 +147,49 @@ esp_err_t config_update_system_config(const system_config_t* config, bool update
     if (ret == ESP_OK) {
         // Apply display settings
         apply_display_settings();
-        ESP_LOGI(TAG, "System config updated (partial)");
+        ESP_LOGD(TAG, "System config updated (partial)");
     }
 
     return ret;
 }
 
-uint16_t config_get_screen_off_lux(void) {
-    uint16_t lux = DEFAULT_SCREEN_OFF_LUX;
-
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        lux = current_config.screen_off_lux;
-        xSemaphoreGive(config_mutex);
-    }
-
-    return lux;
+// Helper macro for simple config getters
+#define CONFIG_GETTER(func_name, return_type, field, default_val) \
+return_type func_name(void) { \
+    return_type value = default_val; \
+    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) { \
+        value = current_config.field; \
+        xSemaphoreGive(config_mutex); \
+    } \
+    return value; \
 }
 
-esp_err_t config_set_screen_off_lux(uint16_t lux) {
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    current_config.screen_off_lux = lux;
-    esp_err_t ret = save_config_to_nvs();
-
-    xSemaphoreGive(config_mutex);
-
-    if (ret == ESP_OK) {
-        apply_display_settings();
-    }
-
-    return ret;
+// Helper macro for simple config setters
+#define CONFIG_SETTER(func_name, param_type, field) \
+esp_err_t func_name(param_type value) { \
+    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) { \
+        return ESP_ERR_TIMEOUT; \
+    } \
+    current_config.field = value; \
+    esp_err_t ret = save_config_to_nvs(); \
+    xSemaphoreGive(config_mutex); \
+    if (ret == ESP_OK) { \
+        apply_display_settings(); \
+    } \
+    return ret; \
 }
 
-bool config_get_screen_enabled(void) {
-    bool enabled = DEFAULT_SCREEN_ENABLED;
+CONFIG_GETTER(config_get_screen_off_lux, uint16_t, screen_off_lux, DEFAULT_SCREEN_OFF_LUX)
+CONFIG_SETTER(config_set_screen_off_lux, uint16_t, screen_off_lux)
 
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        enabled = current_config.screen_enabled;
-        xSemaphoreGive(config_mutex);
-    }
+CONFIG_GETTER(config_get_screen_enabled, bool, screen_enabled, DEFAULT_SCREEN_ENABLED)
+CONFIG_SETTER(config_set_screen_enabled, bool, screen_enabled)
 
-    return enabled;
-}
+CONFIG_GETTER(config_get_screen_brightness, uint8_t, screen_brightness, DEFAULT_SCREEN_BRIGHTNESS)
+CONFIG_SETTER(config_set_screen_brightness, uint8_t, screen_brightness)
 
-esp_err_t config_set_screen_enabled(bool enabled) {
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    current_config.screen_enabled = enabled;
-    esp_err_t ret = save_config_to_nvs();
-
-    xSemaphoreGive(config_mutex);
-
-    if (ret == ESP_OK) {
-        apply_display_settings();
-    }
-
-    return ret;
-}
-
-uint8_t config_get_screen_brightness(void) {
-    uint8_t brightness = DEFAULT_SCREEN_BRIGHTNESS;
-
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        brightness = current_config.screen_brightness;
-        xSemaphoreGive(config_mutex);
-    }
-
-    return brightness;
-}
-
-esp_err_t config_set_screen_brightness(uint8_t brightness) {
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    current_config.screen_brightness = brightness;
-    esp_err_t ret = save_config_to_nvs();
-
-    xSemaphoreGive(config_mutex);
-
-    if (ret == ESP_OK) {
-        apply_display_settings();
-    }
-
-    return ret;
-}
-
-bool config_get_auto_brightness_enabled(void) {
-    bool enabled = DEFAULT_AUTO_BRIGHTNESS;
-
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        enabled = current_config.auto_brightness_enabled;
-        xSemaphoreGive(config_mutex);
-    }
-
-    return enabled;
-}
-
-esp_err_t config_set_auto_brightness_enabled(bool enabled) {
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    current_config.auto_brightness_enabled = enabled;
-    esp_err_t ret = save_config_to_nvs();
-
-    xSemaphoreGive(config_mutex);
-
-    if (ret == ESP_OK) {
-        apply_display_settings();
-    }
-
-    return ret;
-}
+CONFIG_GETTER(config_get_auto_brightness_enabled, bool, auto_brightness_enabled, DEFAULT_AUTO_BRIGHTNESS)
+CONFIG_SETTER(config_set_auto_brightness_enabled, bool, auto_brightness_enabled)
 
 // Private helper functions
 
@@ -378,7 +304,7 @@ static void light_sensor_event_handler(void* handler_args, esp_event_base_t base
         return;
     }
 
-    ESP_LOGD(TAG, "Light sensor reading: %u lux", reading->lux);
+    ESP_LOGV(TAG, "Light sensor reading: %u lux", reading->lux);
 
     // Determine if screen should be enabled based on light level
     uint16_t screen_off_lux = config_get_screen_off_lux();
@@ -401,12 +327,12 @@ static void apply_display_settings(void) {
     if (screen_enabled) {
         // Set brightness to configured value
         display_set_brightness(brightness);
-        ESP_LOGD(TAG, "Applied display settings: enabled, brightness=%d", brightness);
+        ESP_LOGV(TAG, "Applied display settings: enabled, brightness=%d", brightness);
     }
     else {
         // Set brightness to 0 to turn off screen
         display_set_brightness(0);
-        ESP_LOGD(TAG, "Applied display settings: disabled");
+        ESP_LOGV(TAG, "Applied display settings: disabled");
     }
 }
 
@@ -437,7 +363,7 @@ esp_err_t config_reset_to_defaults(void) {
 
     if (ret == ESP_OK) {
         apply_display_settings();
-        ESP_LOGI(TAG, "Config reset to defaults");
+        ESP_LOGD(TAG, "Config reset to defaults");
     }
 
     return ret;

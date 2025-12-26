@@ -19,4 +19,10 @@ void attempt_coredump_upload();
 // Publish the current device configuration (protobuf-c) to the server.
 void sockets_send_device_config();
 
+// Send currently displaying update to the server.
+void sockets_send_currently_displaying(uint8_t* uuid);
+
+// Send device info to the server.
+void sockets_send_device_info();
+
 #endif

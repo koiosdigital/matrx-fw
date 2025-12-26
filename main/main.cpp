@@ -7,6 +7,7 @@
 #include "sdkconfig.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_system.h"
 
 #include "kd_common.h"
@@ -27,7 +28,7 @@ extern "C" void app_main(void)
 
     display_init();
 
-    ESP_LOGI(TAG, "post display Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
+    ESP_LOGD(TAG, "post display Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
 
     // Initialize daughterboard (light sensor and buttons)
     esp_err_t ret = daughterboard_init();
@@ -57,7 +58,7 @@ extern "C" void app_main(void)
 
         while (hold_duration_ms < required_hold_ms) {
             if (!daughterboard_is_button_pressed(0) || !daughterboard_is_button_pressed(2)) {
-                ESP_LOGI(TAG, "Buttons released before 3 seconds, restarting");
+                ESP_LOGD(TAG, "Buttons released before 3 seconds, restarting");
                 vTaskDelay(pdMS_TO_TICKS(100));
                 esp_restart();
             }
@@ -68,8 +69,22 @@ extern "C" void app_main(void)
         // If held for full duration, perform factory reset
         ESP_LOGI(TAG, "Factory reset triggered!");
 
-        // Erase all NVS partitions
-        nvs_flash_erase();
+        // Erase WiFi NVS namespace directly (WiFi not initialized yet, can't use esp_wifi_restore)
+        nvs_handle_t nvs_handle;
+        if (nvs_open("nvs.net80211", NVS_READWRITE, &nvs_handle) == ESP_OK) {
+            nvs_erase_all(nvs_handle);
+            nvs_commit(nvs_handle);
+            nvs_close(nvs_handle);
+            ESP_LOGI(TAG, "WiFi NVS erased");
+        }
+
+        // Erase config NVS namespace directly (config_init not called yet, so no mutex)
+        if (nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
+            nvs_erase_all(nvs_handle);
+            nvs_commit(nvs_handle);
+            nvs_close(nvs_handle);
+            ESP_LOGI(TAG, "Config NVS erased");
+        }
 
         show_fs_sprite("factory_reset_success");
 
@@ -89,7 +104,7 @@ extern "C" void app_main(void)
 
     kd_common_init();
 
-    ESP_LOGI(TAG, "post kdc Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
+    ESP_LOGD(TAG, "post kdc Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
 
     // Initialize config module after kd_common_init (which initializes NVS)
     ret = config_init();
@@ -99,9 +114,9 @@ extern "C" void app_main(void)
 
     scheduler_init();
 
-    ESP_LOGI(TAG, "post scheduler Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
+    ESP_LOGD(TAG, "post scheduler Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
     sockets_init();
 
-    ESP_LOGI(TAG, "post sockets Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
+    ESP_LOGD(TAG, "post sockets Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
     vTaskSuspend(NULL);
 }

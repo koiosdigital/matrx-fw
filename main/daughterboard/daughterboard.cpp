@@ -15,8 +15,6 @@ static const char* TAG = "daughterboard";
 // Event base definition
 ESP_EVENT_DEFINE_BASE(DAUGHTERBOARD_EVENTS);
 
-// ESP timer handle for light sensor
-static esp_timer_handle_t light_sensor_timer_handle = NULL;
 
 // VEML6030 register definitions
 #define VEML6030_REG_ALS_CONF   0x00
@@ -160,43 +158,50 @@ static esp_err_t veml6030_read_reg(uint8_t reg, uint16_t* value) {
     return ret;
 }
 
-// Light sensor timer callback
-static void light_sensor_timer_callback(void* arg) {
-    uint16_t lux;
-    esp_err_t ret = daughterboard_get_light_reading(&lux);
+// Task handle for light sensor reading
+static TaskHandle_t light_sensor_task_handle = NULL;
 
-    if (ret == ESP_OK) {
-        light_reading_t reading = {
-            .lux = lux,
-            .timestamp = (uint32_t)(esp_timer_get_time() / 1000)  // Convert to ms
-        };
+// Light sensor task - independent task with its own timing
+static void light_sensor_task(void* arg) {
+    while (1) {
+        // Wait for the configured interval
+        vTaskDelay(pdMS_TO_TICKS(LIGHT_SENSOR_INTERVAL_US / 1000));
 
-        esp_event_post(DAUGHTERBOARD_EVENTS,
-            DAUGHTERBOARD_EVENT_LIGHT_READING,
-            &reading,
-            sizeof(reading),
-            0);
+        uint16_t lux;
+        esp_err_t ret = daughterboard_get_light_reading(&lux);
 
-        ESP_LOGI(TAG, "Light reading: %u lux", lux);
-    }
-    else {
-        ESP_LOGW(TAG, "Failed to read light sensor: %s", esp_err_to_name(ret));
+        if (ret == ESP_OK) {
+            light_reading_t reading = {
+                .lux = lux,
+                .timestamp = (uint32_t)(esp_timer_get_time() / 1000)  // Convert to ms
+            };
 
-        // Try to read raw register for debugging
-        uint16_t raw_debug;
-        esp_err_t debug_ret = veml6030_read_reg(VEML6030_REG_ALS, &raw_debug);
-        if (debug_ret == ESP_OK) {
-            ESP_LOGW(TAG, "Raw ALS register value: %u", raw_debug);
+            esp_event_post(DAUGHTERBOARD_EVENTS,
+                DAUGHTERBOARD_EVENT_LIGHT_READING,
+                &reading,
+                sizeof(reading),
+                0);
+
+            ESP_LOGD(TAG, "Light reading: %u lux", lux);
         }
         else {
-            ESP_LOGE(TAG, "Cannot even read raw ALS register: %s", esp_err_to_name(debug_ret));
+            ESP_LOGW(TAG, "Failed to read light sensor: %s", esp_err_to_name(ret));
+
+            // Try to read raw register for debugging
+            uint16_t raw_debug;
+            esp_err_t debug_ret = veml6030_read_reg(VEML6030_REG_ALS, &raw_debug);
+            if (debug_ret == ESP_OK) {
+                ESP_LOGW(TAG, "Raw ALS register value: %u", raw_debug);
+            }
+            else {
+                ESP_LOGE(TAG, "Cannot even read raw ALS register: %s", esp_err_to_name(debug_ret));
+            }
         }
     }
 }
 
 // Button ISR handler
 static void IRAM_ATTR button_isr_handler(void* arg) {
-    ESP_EARLY_LOGI(TAG, "Button ISR triggered for GPIO %d", (int)arg);
     uint32_t button_id = (uint32_t)arg;
     uint64_t current_time = esp_timer_get_time();
 
@@ -353,38 +358,28 @@ esp_err_t daughterboard_init(void) {
         return ret;
     }
 
-    // Create ESP timer for light sensor
-    const esp_timer_create_args_t light_sensor_timer_args = {
-        .callback = &light_sensor_timer_callback,
-        .arg = NULL,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "light_sensor"
-    };
-
-    ret = esp_timer_create(&light_sensor_timer_args, &light_sensor_timer_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create light sensor timer: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // Start the timer (auto-reload, 5 second interval)
-    ret = esp_timer_start_periodic(light_sensor_timer_handle, LIGHT_SENSOR_INTERVAL_US);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start light sensor timer: %s", esp_err_to_name(ret));
-        esp_timer_delete(light_sensor_timer_handle);
-        light_sensor_timer_handle = NULL;
-        return ret;
+    // Create task for light sensor reading (independent task with its own timing)
+    BaseType_t task_ret = xTaskCreate(
+        light_sensor_task,
+        "light_sensor",
+        2048,  // Adequate stack for I2C operations
+        NULL,
+        5,     // Priority
+        &light_sensor_task_handle
+    );
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create light sensor task");
+        return ESP_FAIL;
     }
 
     return ESP_OK;
 }
 
 esp_err_t daughterboard_deinit(void) {
-    // Stop and delete timer
-    if (light_sensor_timer_handle != NULL) {
-        esp_timer_stop(light_sensor_timer_handle);
-        esp_timer_delete(light_sensor_timer_handle);
-        light_sensor_timer_handle = NULL;
+    // Delete the light sensor task
+    if (light_sensor_task_handle != NULL) {
+        vTaskDelete(light_sensor_task_handle);
+        light_sensor_task_handle = NULL;
     }
 
     // Remove ISR handlers

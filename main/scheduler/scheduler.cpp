@@ -25,7 +25,6 @@ SemaphoreHandle_t schedule_mutex = NULL;
 
 // Current scheduler state
 uint32_t current_schedule_item = 0;
-uint32_t current_display_time_remaining = 0;
 bool scheduler_running = false;
 bool has_valid_schedule = false;
 
@@ -103,6 +102,32 @@ static bool has_displayable_items() {
     return false;
 }
 
+// Helper function to find next valid displayable item (wraps around)
+static uint32_t find_next_displayable_item(uint32_t start_index) {
+    uint32_t next = start_index + 1;
+    uint32_t checked = 0;
+
+    while (checked < MAX_SCHEDULE_ITEMS) {
+        // Wrap around
+        if (next >= MAX_SCHEDULE_ITEMS || !schedule_item_valid_uuid(&schedule_items[next])) {
+            next = 0;
+        }
+
+        // Found a displayable item
+        if (schedule_item_valid_uuid(&schedule_items[next]) &&
+            !schedule_items[next].flags.skipped_user &&
+            !schedule_items[next].flags.skipped_server) {
+            return next;
+        }
+
+        next++;
+        checked++;
+    }
+
+    // No displayable items found, return start index
+    return start_index;
+}
+
 // Main scheduler loop that runs every second
 TickType_t sprite_start_tick = 0;
 uint64_t last_schedule_request_time = 0;
@@ -113,7 +138,6 @@ static void request_renders_for_upcoming_items() {
         return;
     }
 
-    // Find the current item and check if we need to request renders
     ScheduleItem_t* current_item = &schedule_items[current_schedule_item];
     if (!schedule_item_valid_uuid(current_item)) {
         return;
@@ -121,51 +145,20 @@ static void request_renders_for_upcoming_items() {
 
     uint64_t current_time = pdTICKS_TO_MS(xTaskGetTickCount());
     uint64_t time_since_start = current_time - pdTICKS_TO_MS(sprite_start_tick);
-    uint32_t display_duration = current_item->flags.display_time * 1000; // Convert to milliseconds
+    uint32_t display_duration = current_item->flags.display_time * 1000;
 
-    // Check if we're 3 seconds before the next item
-    if (time_since_start == (display_duration - PREPARE_TIME)) {
-        // Request renders for upcoming items
-        uint32_t next_item_index = current_schedule_item + 1;
-
+    // Check if we're within PREPARE_TIME seconds before the next item
+    if (time_since_start >= (display_duration - PREPARE_TIME) && time_since_start < display_duration) {
         // If pinned item, request render for itself
         if (current_item->flags.pinned) {
             request_render(current_item->uuid);
             return;
         }
 
-        // Request renders for all items after current until next displayable item
-        while (next_item_index < MAX_SCHEDULE_ITEMS) {
-            ScheduleItem_t* item = &schedule_items[next_item_index];
-
-            // If we reach an invalid item, wrap to beginning
-            if (!schedule_item_valid_uuid(item)) {
-                next_item_index = 0;
-                item = &schedule_items[next_item_index];
-                if (!schedule_item_valid_uuid(item)) {
-                    break; // No valid items at all
-                }
-            }
-
-            // Don't request renders for user-skipped items
-            if (!item->flags.skipped_user) {
-                request_render(item->uuid);
-            }
-
-            // If this item is not server skipped, it will be displayed next, so stop here
-            if (!item->flags.skipped_server && !item->flags.skipped_user) {
-                break;
-            }
-
-            next_item_index++;
-            if (next_item_index >= MAX_SCHEDULE_ITEMS) {
-                next_item_index = 0;
-            }
-
-            // Prevent infinite loop if all items are skipped
-            if (next_item_index == current_schedule_item + 1) {
-                break;
-            }
+        // Request render for the next displayable item
+        uint32_t next = find_next_displayable_item(current_schedule_item);
+        if (next != current_schedule_item && schedule_item_valid_uuid(&schedule_items[next])) {
+            request_render(schedule_items[next].uuid);
         }
     }
 }
@@ -198,7 +191,7 @@ void scheduler_task(void* pvParameter) {
                             schedule_items[i].flags.pinned = false;
                         }
                         current_item->flags.pinned = true;
-                        ESP_LOGI(TAG, "Pinned current schedule item %d", current_schedule_item);
+                        ESP_LOGD(TAG, "Pinned current schedule item %d", current_schedule_item);
                     }
                 }
                 break;
@@ -228,7 +221,9 @@ void scheduler_task(void* pvParameter) {
                         current_schedule_item = prev_item;
                         sprite_start_tick = xTaskGetTickCount();
                         show_sprite(schedule_items[current_schedule_item].sprite);
-                        ESP_LOGI(TAG, "Moved to previous item %d", current_schedule_item);
+                        // Notify server of currently displaying sprite
+                        sockets_send_currently_displaying(schedule_items[current_schedule_item].uuid);
+                        ESP_LOGD(TAG, "Moved to previous item %d", current_schedule_item);
                     }
                 }
                 break;
@@ -239,7 +234,7 @@ void scheduler_task(void* pvParameter) {
         uint64_t current_time = pdTICKS_TO_MS(xTaskGetTickCount());
         if (!has_valid_schedule || (current_time - last_schedule_request_time > (60 * 5 * 1000))) {
             request_schedule();
-            ESP_LOGI(TAG, "Requesting latest schedule...");
+            ESP_LOGD(TAG, "Requesting latest schedule...");
             last_schedule_request_time = current_time;
 
             // Only skip loop if no schedule at all
@@ -267,44 +262,28 @@ void scheduler_task(void* pvParameter) {
                         sprite_start_tick = xTaskGetTickCount();
                     }
                     else {
-                        // Move to next item
-                        uint32_t next_item = current_schedule_item + 1;
+                        // Move to next displayable item
+                        uint32_t next_item = find_next_displayable_item(current_schedule_item);
 
-                        // Find next valid, non-skipped item
-                        while (true) {
-                            // Wrap around if we reach the end
-                            if (next_item >= MAX_SCHEDULE_ITEMS || !schedule_item_valid_uuid(&schedule_items[next_item])) {
-                                next_item = 0;
-                            }
-
-                            // Check if this item should be displayed
-                            if (schedule_item_valid_uuid(&schedule_items[next_item]) &&
-                                !schedule_items[next_item].flags.skipped_user &&
-                                !schedule_items[next_item].flags.skipped_server) {
-                                break;
-                            }
-
-                            ESP_LOGI(TAG, "Skipping item %d", next_item);
-                            next_item++;
-
-                            // Prevent infinite loop if all items are skipped
-                            if (next_item == current_schedule_item + 1) {
-                                ESP_LOGW(TAG, "All items are skipped, clearing display");
-                                display_clear();
-                                next_item = current_schedule_item;
-                                break;
-                            }
+                        // Check if we actually found a different item
+                        if (next_item == current_schedule_item) {
+                            ESP_LOGW(TAG, "All items are skipped, clearing display");
+                            display_clear();
                         }
+                        else {
+                            current_schedule_item = next_item;
+                            sprite_start_tick = xTaskGetTickCount();
 
-                        current_schedule_item = next_item;
-                        sprite_start_tick = xTaskGetTickCount();
+                            // Display the sprite
+                            if (schedule_items[current_schedule_item].sprite != NULL) {
+                                show_sprite(schedule_items[current_schedule_item].sprite);
+                            }
 
-                        // Display the sprite
-                        if (schedule_items[current_schedule_item].sprite != NULL) {
-                            show_sprite(schedule_items[current_schedule_item].sprite);
+                            // Notify server of currently displaying sprite
+                            sockets_send_currently_displaying(schedule_items[current_schedule_item].uuid);
+
+                            ESP_LOGD(TAG, "Advanced to schedule item %d", current_schedule_item);
                         }
-
-                        ESP_LOGI(TAG, "Advanced to schedule item %d", current_schedule_item);
                     }
 
                     need_to_skip = false;
@@ -315,7 +294,7 @@ void scheduler_task(void* pvParameter) {
         // Check if there are any displayable items, if not clear the display
         if (has_valid_schedule && !has_displayable_items()) {
             display_clear();
-            ESP_LOGI(TAG, "No displayable items available, clearing display");
+            ESP_LOGD(TAG, "No displayable items available, clearing display");
         }
 
         xSemaphoreGive(schedule_mutex);
@@ -382,7 +361,6 @@ void scheduler_set_schedule(Kd__V1__MatrxSchedule* schedule_response) {
     }
 
     sprite_start_tick = xTaskGetTickCount();
-    current_display_time_remaining = 0;
 
     //request renders for the first few items
     for (int j = 0; j < 3; j++) {
@@ -399,16 +377,18 @@ void scheduler_set_schedule(Kd__V1__MatrxSchedule* schedule_response) {
     // Check if there are any displayable items
     if (!has_displayable_items()) {
         display_clear();
-        ESP_LOGI(TAG, "No displayable items in new schedule, clearing display");
+        ESP_LOGD(TAG, "No displayable items in new schedule, clearing display");
     }
     else {
         // Display the first sprite immediately
         if (schedule_items[current_schedule_item].sprite != NULL) {
             show_sprite(schedule_items[current_schedule_item].sprite);
         }
+        // Notify server of currently displaying sprite
+        sockets_send_currently_displaying(schedule_items[current_schedule_item].uuid);
     }
 
-    ESP_LOGI(TAG, "Schedule updated with %d items, starting with item %d", schedule_response->n_schedule_items, current_schedule_item);
+    ESP_LOGD(TAG, "Schedule updated with %d items, starting with item %d", schedule_response->n_schedule_items, current_schedule_item);
     xSemaphoreGive(schedule_mutex);
 }
 
@@ -425,11 +405,10 @@ void scheduler_clear() {
     has_valid_schedule = false;
     scheduler_running = false;
     current_schedule_item = 0;
-    current_display_time_remaining = 0;
 
     // Clear the display when schedule is cleared
     display_clear();
-    ESP_LOGI(TAG, "Schedule cleared, display cleared");
+    ESP_LOGD(TAG, "Schedule cleared, display cleared");
 
     xSemaphoreGive(schedule_mutex);
 }
@@ -444,7 +423,7 @@ void scheduler_skip_schedule_item(uint8_t* schedule_item_uuid) {
         // Check if no items are displayable after this skip
         if (!has_displayable_items()) {
             display_clear();
-            ESP_LOGI(TAG, "No displayable items remaining after skip, clearing display");
+            ESP_LOGD(TAG, "No displayable items remaining after skip, clearing display");
         }
     }
 
@@ -472,7 +451,9 @@ void scheduler_pin_schedule_item(uint8_t* schedule_item_uuid) {
                 if (schedule_item->sprite != NULL) {
                     show_sprite(schedule_item->sprite);
                 }
-                ESP_LOGI(TAG, "Switched to and pinned schedule item %d", i);
+                // Notify server of currently displaying sprite
+                sockets_send_currently_displaying(schedule_item->uuid);
+                ESP_LOGD(TAG, "Switched to and pinned schedule item %d", i);
                 break;
             }
         }
@@ -527,9 +508,8 @@ void scheduler_init() {
     xSemaphoreGive(schedule_mutex);
 
     // Create the scheduler task
-    xTaskCreate(scheduler_task, "scheduler", 8192, NULL, 5, &xSchedulerTask);
+    xTaskCreate(scheduler_task, "scheduler", 6144, NULL, 5, &xSchedulerTask);
 
     esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED, button_event_handler, NULL);
-    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED, button_event_handler, NULL);
     esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED, button_event_handler, NULL);
 }
