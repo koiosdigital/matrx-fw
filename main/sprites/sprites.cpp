@@ -13,7 +13,6 @@ static const char* TAG = "sprites";
 
 void list_static_images() {
     // This function will be implemented once static_files.h is properly generated
-    ESP_LOGI(TAG, "Static images listing not yet implemented");
 }
 
 void sprite_free(RAMSprite_t* sprite) {
@@ -53,24 +52,11 @@ RAMSprite_t* sprite_allocate() {
 }
 
 void sprite_update_data(RAMSprite_t* sprite, const uint8_t* data, size_t len) {
-    if (sprite == NULL) {
-        ESP_LOGE(TAG, "invalid sprite pointer");
-        return;
-    }
+    if (sprite == NULL || sprite->mutex == NULL) return;
 
-    if (sprite->mutex == NULL) {
-        ESP_LOGE(TAG, "sprite mutex is null");
-        return;
-    }
-
-    // Take mutex to ensure exclusive access during data update
-    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGE(TAG, "failed to take sprite mutex");
-        return;
-    }
+    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) return;
 
     if (data == NULL || len == 0) {
-        ESP_LOGE(TAG, "invalid sprite data");
         free(sprite->data);
         sprite->data = NULL;
         sprite->len = 0;
@@ -81,7 +67,7 @@ void sprite_update_data(RAMSprite_t* sprite, const uint8_t* data, size_t len) {
     free(sprite->data);
     sprite->data = (uint8_t*)heap_caps_calloc(len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (sprite->data == NULL) {
-        ESP_LOGE(TAG, "malloc failed: update sprite data");
+        ESP_LOGE(TAG, "Sprite malloc failed (%zu bytes)", len);
         sprite->len = 0;
         xSemaphoreGive(sprite->mutex);
         return;
@@ -90,53 +76,29 @@ void sprite_update_data(RAMSprite_t* sprite, const uint8_t* data, size_t len) {
     memcpy(sprite->data, data, len);
     sprite->len = len;
 
-    // Release mutex after data update is complete
     xSemaphoreGive(sprite->mutex);
 }
 
 void show_fs_sprite(const char* filename) {
-    if (filename == NULL) {
-        ESP_LOGE(TAG, "invalid filename");
-        return;
-    }
-
-    // For now, just use filesystem - static files integration will be added later
-    ESP_LOGI(TAG, "loading sprite from static: %s", filename);
+    if (filename == NULL) return;
 
     const uint8_t* data_ptr = NULL;
     size_t data_len = 0;
 
     if (get_image_data(filename, &data_ptr, &data_len) == 0) {
-        ESP_LOGE(TAG, "failed to get image data for %s", filename);
+        ESP_LOGD(TAG, "Image not found: %s", filename);
         return;
     }
-
-    ESP_LOGI(TAG, "displaying sprite %s (%zu bytes)", filename, data_len);
 
     display_sprite((uint8_t*)data_ptr, data_len);
 }
 
 void show_sprite(RAMSprite_t* sprite) {
-    if (sprite == NULL) {
-        ESP_LOGE(TAG, "invalid sprite pointer");
-        return;
-    }
+    if (sprite == NULL || sprite->mutex == NULL) return;
 
-    if (sprite->mutex == NULL) {
-        ESP_LOGE(TAG, "sprite mutex is null");
-        return;
-    }
+    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) return;
 
-    // Take mutex to ensure sprite data doesn't change during display
-    // This will block until any update_data operation is complete
-    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGE(TAG, "failed to take sprite mutex for display");
-        return;
-    }
-
-    // Check data validity while holding the mutex
     if (sprite->data == NULL || sprite->len == 0) {
-        ESP_LOGE(TAG, "invalid sprite data");
         xSemaphoreGive(sprite->mutex);
         return;
     }
@@ -145,10 +107,10 @@ void show_sprite(RAMSprite_t* sprite) {
     free(fs_sprite_buf);
     fs_sprite_buf = NULL;
 
-    // Create a buffer copy of the sprite data to prevent issues if the original data changes
+    // Create a buffer copy of the sprite data
     fs_sprite_buf = (uint8_t*)heap_caps_calloc(sprite->len, sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (fs_sprite_buf == NULL) {
-        ESP_LOGE(TAG, "malloc failed: fs_sprite_buf for RAM sprite");
+        ESP_LOGE(TAG, "Sprite display malloc failed");
         xSemaphoreGive(sprite->mutex);
         return;
     }
@@ -156,10 +118,8 @@ void show_sprite(RAMSprite_t* sprite) {
     memcpy(fs_sprite_buf, sprite->data, sprite->len);
     size_t sprite_len = sprite->len;
 
-    // Release mutex after copying data
     xSemaphoreGive(sprite->mutex);
 
-    // Display the copied data (no need to hold mutex during display)
     display_sprite(fs_sprite_buf, sprite_len);
 }
 
@@ -170,19 +130,11 @@ void sprites_cleanup() {
 
 // Thread-safe function to get a copy of sprite data
 bool sprite_get_data_copy(RAMSprite_t* sprite, uint8_t** data_copy, size_t* len) {
-    if (sprite == NULL || data_copy == NULL || len == NULL) {
-        ESP_LOGE(TAG, "invalid parameters for sprite_get_data_copy");
+    if (sprite == NULL || data_copy == NULL || len == NULL || sprite->mutex == NULL) {
         return false;
     }
 
-    if (sprite->mutex == NULL) {
-        ESP_LOGE(TAG, "sprite mutex is null");
-        return false;
-    }
-
-    // Take mutex to ensure consistent data read
     if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGE(TAG, "failed to take sprite mutex for data copy");
         return false;
     }
 
@@ -190,19 +142,16 @@ bool sprite_get_data_copy(RAMSprite_t* sprite, uint8_t** data_copy, size_t* len)
         *data_copy = NULL;
         *len = 0;
         xSemaphoreGive(sprite->mutex);
-        return true; // Valid state, just empty
+        return true;
     }
 
-    // Allocate copy buffer
     *data_copy = (uint8_t*)heap_caps_malloc(sprite->len, MALLOC_CAP_SPIRAM);
     if (*data_copy == NULL) {
-        ESP_LOGE(TAG, "failed to allocate memory for sprite data copy");
         *len = 0;
         xSemaphoreGive(sprite->mutex);
         return false;
     }
 
-    // Copy data
     memcpy(*data_copy, sprite->data, sprite->len);
     *len = sprite->len;
 
@@ -212,16 +161,9 @@ bool sprite_get_data_copy(RAMSprite_t* sprite, uint8_t** data_copy, size_t* len)
 
 // Thread-safe function to get sprite length
 size_t sprite_get_length(RAMSprite_t* sprite) {
-    if (sprite == NULL || sprite->mutex == NULL) {
-        ESP_LOGE(TAG, "invalid sprite or mutex for sprite_get_length");
-        return 0;
-    }
+    if (sprite == NULL || sprite->mutex == NULL) return 0;
 
-    // Take mutex to ensure consistent read
-    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) {
-        ESP_LOGE(TAG, "failed to take sprite mutex for length read");
-        return 0;
-    }
+    if (xSemaphoreTake(sprite->mutex, portMAX_DELAY) != pdTRUE) return 0;
 
     size_t len = sprite->len;
     xSemaphoreGive(sprite->mutex);

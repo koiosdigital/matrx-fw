@@ -1,6 +1,7 @@
 #include "config.h"
 
-#include <string.h>
+#include <cstring>
+
 #include <esp_log.h>
 #include <nvs_flash.h>
 #include <nvs.h>
@@ -8,106 +9,249 @@
 
 #include "display.h"
 #include "daughterboard.h"
+#include "raii_utils.hpp"
+#include <nvs_handle.hpp>
 
 static const char* TAG = "config";
 
-// Current system configuration (cached in memory)
-static system_config_t current_config = {
-    .screen_enabled = DEFAULT_SCREEN_ENABLED,
-    .screen_brightness = DEFAULT_SCREEN_BRIGHTNESS,
-    .auto_brightness_enabled = DEFAULT_AUTO_BRIGHTNESS,
-    .screen_off_lux = DEFAULT_SCREEN_OFF_LUX
+namespace {
+
+// Encapsulated configuration state
+struct ConfigState {
+    system_config_t config = {
+        .screen_enabled = DEFAULT_SCREEN_ENABLED,
+        .screen_brightness = DEFAULT_SCREEN_BRIGHTNESS,
+        .auto_brightness_enabled = DEFAULT_AUTO_BRIGHTNESS,
+        .screen_off_lux = DEFAULT_SCREEN_OFF_LUX
+    };
+    SemaphoreHandle_t mutex = nullptr;
+
+    bool init_mutex() {
+        mutex = xSemaphoreCreateMutex();
+        return mutex != nullptr;
+    }
+
+    // Get config with lock
+    system_config_t get() {
+        raii::MutexGuard lock(mutex, pdMS_TO_TICKS(100));
+        if (lock) {
+            return config;
+        }
+        ESP_LOGW(TAG, "Failed to take config mutex");
+        return {DEFAULT_SCREEN_ENABLED, DEFAULT_SCREEN_BRIGHTNESS,
+                DEFAULT_AUTO_BRIGHTNESS, DEFAULT_SCREEN_OFF_LUX};
+    }
+
+    // Get single field with lock
+    template<typename T>
+    T get_field(T system_config_t::*field, T default_val) {
+        raii::MutexGuard lock(mutex, pdMS_TO_TICKS(100));
+        return lock ? config.*field : default_val;
+    }
+
+    // Set single field with lock, returns true if successful
+    template<typename T>
+    bool set_field(T system_config_t::*field, T value) {
+        raii::MutexGuard lock(mutex, pdMS_TO_TICKS(100));
+        if (!lock) return false;
+        config.*field = value;
+        return true;
+    }
 };
 
-// Mutex for thread-safe config access
-static SemaphoreHandle_t config_mutex = NULL;
+ConfigState state;
 
-// Forward declarations
-static esp_err_t load_config_from_nvs(void);
-static esp_err_t save_config_to_nvs(void);
-static void light_sensor_event_handler(void* handler_args, esp_event_base_t base,
-    int32_t event_id, void* event_data);
-static void apply_display_settings(void);
-
-esp_err_t config_init(void) {
-    esp_err_t ret;
-
-    // Create mutex for thread-safe access
-    config_mutex = xSemaphoreCreateMutex();
-    if (config_mutex == NULL) {
-        ESP_LOGE(TAG, "Failed to create config mutex");
-        return ESP_ERR_NO_MEM;
+// NVS operations
+esp_err_t load_from_nvs() {
+    kd::NvsHandle nvs(NVS_CONFIG_NAMESPACE, NVS_READONLY);
+    if (!nvs) {
+        return nvs.open_error();
     }
 
-    // Load configuration from NVS
-    ret = load_config_from_nvs();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to load config from NVS, using defaults: %s", esp_err_to_name(ret));
-        // Save default config to NVS
-        save_config_to_nvs();
+    size_t size;
+    uint8_t temp_u8;
+
+    // Load screen enabled
+    size = sizeof(uint8_t);
+    if (nvs.get_blob(NVS_CONFIG_SCREEN_ENABLE, &temp_u8, &size) == ESP_OK) {
+        state.config.screen_enabled = (temp_u8 != 0);
     }
 
-    // Register event handler for light sensor readings
-    ret = esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_LIGHT_READING,
-        light_sensor_event_handler, NULL);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register light sensor event handler: %s", esp_err_to_name(ret));
-        return ret;
+    // Load screen brightness
+    size = sizeof(uint8_t);
+    if (nvs.get_blob(NVS_CONFIG_SCREEN_BRIGHTNESS, &state.config.screen_brightness, &size) != ESP_OK) {
+        state.config.screen_brightness = DEFAULT_SCREEN_BRIGHTNESS;
     }
 
-    // Apply initial display settings
-    apply_display_settings();
+    // Load auto brightness
+    size = sizeof(uint8_t);
+    if (nvs.get_blob(NVS_CONFIG_AUTO_BRIGHTNESS, &temp_u8, &size) == ESP_OK) {
+        state.config.auto_brightness_enabled = (temp_u8 != 0);
+    }
 
-    ESP_LOGD(TAG, "Config module initialized");
-    ESP_LOGD(TAG, "Screen enabled: %s, Brightness: %d, Auto brightness: %s, Screen off lux: %u",
-        current_config.screen_enabled ? "true" : "false",
-        current_config.screen_brightness,
-        current_config.auto_brightness_enabled ? "true" : "false",
-        current_config.screen_off_lux);
+    // Load screen off lux
+    size = sizeof(uint16_t);
+    if (nvs.get_blob(NVS_CONFIG_SCREEN_OFF_LUX, &state.config.screen_off_lux, &size) != ESP_OK) {
+        state.config.screen_off_lux = DEFAULT_SCREEN_OFF_LUX;
+    }
 
     return ESP_OK;
 }
 
-system_config_t config_get_system_config(void) {
-    system_config_t config;
-
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        config = current_config;
-        xSemaphoreGive(config_mutex);
-    }
-    else {
-        ESP_LOGW(TAG, "Failed to take config mutex");
-        // Return default config if mutex failed
-        config.screen_enabled = DEFAULT_SCREEN_ENABLED;
-        config.screen_brightness = DEFAULT_SCREEN_BRIGHTNESS;
-        config.auto_brightness_enabled = DEFAULT_AUTO_BRIGHTNESS;
-        config.screen_off_lux = DEFAULT_SCREEN_OFF_LUX;
+esp_err_t save_to_nvs() {
+    kd::NvsHandle nvs(NVS_CONFIG_NAMESPACE, NVS_READWRITE);
+    if (!nvs) {
+        ESP_LOGE(TAG, "Error opening NVS: %s", esp_err_to_name(nvs.open_error()));
+        return nvs.open_error();
     }
 
-    return config;
+    uint8_t temp_u8 = state.config.screen_enabled ? 1 : 0;
+    esp_err_t err = nvs.set_blob(NVS_CONFIG_SCREEN_ENABLE, &temp_u8, sizeof(uint8_t));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error saving screen enable: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs.set_blob(NVS_CONFIG_SCREEN_BRIGHTNESS, &state.config.screen_brightness, sizeof(uint8_t));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error saving brightness: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    temp_u8 = state.config.auto_brightness_enabled ? 1 : 0;
+    err = nvs.set_blob(NVS_CONFIG_AUTO_BRIGHTNESS, &temp_u8, sizeof(uint8_t));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error saving auto brightness: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs.set_blob(NVS_CONFIG_SCREEN_OFF_LUX, &state.config.screen_off_lux, sizeof(uint16_t));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error saving screen off lux: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs.commit();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error committing NVS: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+// Apply display settings - caller must NOT hold the config mutex
+void apply_display_settings() {
+    bool screen_enabled = config_get_screen_enabled();
+    uint8_t brightness = config_get_screen_brightness();
+
+    if (screen_enabled) {
+        display_set_brightness(brightness);
+        ESP_LOGV(TAG, "Applied display settings: enabled, brightness=%d", brightness);
+    } else {
+        display_set_brightness(0);
+        ESP_LOGV(TAG, "Applied display settings: disabled");
+    }
+}
+
+// Apply display settings using already-fetched values (safe to call while holding mutex)
+void apply_display_settings_unlocked(bool screen_enabled, uint8_t brightness) {
+    if (screen_enabled) {
+        display_set_brightness(brightness);
+        ESP_LOGV(TAG, "Applied display settings: enabled, brightness=%d", brightness);
+    } else {
+        display_set_brightness(0);
+        ESP_LOGV(TAG, "Applied display settings: disabled");
+    }
+}
+
+void light_sensor_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
+    if (event_id != DAUGHTERBOARD_EVENT_LIGHT_READING) {
+        return;
+    }
+
+    auto* reading = static_cast<light_reading_t*>(event_data);
+    if (reading == nullptr) {
+        return;
+    }
+
+    if (!config_get_auto_brightness_enabled()) {
+        return;
+    }
+
+    ESP_LOGV(TAG, "Light sensor reading: %u lux", reading->lux);
+
+    uint16_t screen_off_lux = config_get_screen_off_lux();
+    bool should_enable = (reading->lux > screen_off_lux);
+    bool currently_enabled = config_get_screen_enabled();
+
+    if (should_enable != currently_enabled) {
+        ESP_LOGI(TAG, "Auto brightness: %s screen (lux=%u)",
+                 should_enable ? "enabling" : "disabling", reading->lux);
+        config_set_screen_enabled(should_enable);
+    }
+}
+
+}  // namespace
+
+//MARK: Public API
+
+esp_err_t config_init() {
+    if (!state.init_mutex()) {
+        ESP_LOGE(TAG, "Failed to create config mutex");
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = load_from_nvs();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to load config, using defaults: %s", esp_err_to_name(ret));
+        save_to_nvs();
+    }
+
+    ret = esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_LIGHT_READING,
+                                     light_sensor_event_handler, nullptr);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register light sensor handler: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    apply_display_settings();
+
+    ESP_LOGD(TAG, "Config initialized: enabled=%s, brightness=%d, auto=%s, off_lux=%u",
+             state.config.screen_enabled ? "true" : "false",
+             state.config.screen_brightness,
+             state.config.auto_brightness_enabled ? "true" : "false",
+             state.config.screen_off_lux);
+
+    return ESP_OK;
+}
+
+system_config_t config_get_system_config() {
+    return state.get();
 }
 
 esp_err_t config_set_system_config(const system_config_t* config) {
-    if (config == NULL) {
+    if (config == nullptr) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        ESP_LOGE(TAG, "Failed to take config mutex");
-        return ESP_ERR_TIMEOUT;
-    }
+    bool screen_enabled;
+    uint8_t brightness;
+    esp_err_t ret;
 
-    // Update configuration
-    current_config = *config;
+    {
+        raii::MutexGuard lock(state.mutex, pdMS_TO_TICKS(100));
+        if (!lock) {
+            ESP_LOGE(TAG, "Failed to take config mutex");
+            return ESP_ERR_TIMEOUT;
+        }
 
-    // Save to NVS
-    esp_err_t ret = save_config_to_nvs();
-
-    xSemaphoreGive(config_mutex);
+        state.config = *config;
+        screen_enabled = state.config.screen_enabled;
+        brightness = state.config.screen_brightness;
+        ret = save_to_nvs();
+    }  // mutex released here
 
     if (ret == ESP_OK) {
-        // Apply display settings
-        apply_display_settings();
+        apply_display_settings_unlocked(screen_enabled, brightness);
         ESP_LOGD(TAG, "System config updated");
     }
 
@@ -115,254 +259,143 @@ esp_err_t config_set_system_config(const system_config_t* config) {
 }
 
 esp_err_t config_update_system_config(const system_config_t* config, bool update_screen_enabled,
-    bool update_brightness, bool update_auto_brightness, bool update_screen_off_lux) {
-    if (config == NULL) {
+                                       bool update_brightness, bool update_auto_brightness,
+                                       bool update_screen_off_lux) {
+    if (config == nullptr) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        ESP_LOGE(TAG, "Failed to take config mutex");
-        return ESP_ERR_TIMEOUT;
-    }
+    bool screen_enabled;
+    uint8_t brightness;
+    esp_err_t ret;
 
-    // Update only specified fields
-    if (update_screen_enabled) {
-        current_config.screen_enabled = config->screen_enabled;
-    }
-    if (update_brightness) {
-        current_config.screen_brightness = config->screen_brightness;
-    }
-    if (update_auto_brightness) {
-        current_config.auto_brightness_enabled = config->auto_brightness_enabled;
-    }
-    if (update_screen_off_lux) {
-        current_config.screen_off_lux = config->screen_off_lux;
-    }
+    {
+        raii::MutexGuard lock(state.mutex, pdMS_TO_TICKS(100));
+        if (!lock) {
+            ESP_LOGE(TAG, "Failed to take config mutex");
+            return ESP_ERR_TIMEOUT;
+        }
 
-    // Save to NVS
-    esp_err_t ret = save_config_to_nvs();
+        if (update_screen_enabled) {
+            state.config.screen_enabled = config->screen_enabled;
+        }
+        if (update_brightness) {
+            state.config.screen_brightness = config->screen_brightness;
+        }
+        if (update_auto_brightness) {
+            state.config.auto_brightness_enabled = config->auto_brightness_enabled;
+        }
+        if (update_screen_off_lux) {
+            state.config.screen_off_lux = config->screen_off_lux;
+        }
 
-    xSemaphoreGive(config_mutex);
+        screen_enabled = state.config.screen_enabled;
+        brightness = state.config.screen_brightness;
+        ret = save_to_nvs();
+    }  // mutex released here
 
     if (ret == ESP_OK) {
-        // Apply display settings
-        apply_display_settings();
+        apply_display_settings_unlocked(screen_enabled, brightness);
         ESP_LOGD(TAG, "System config updated (partial)");
     }
 
     return ret;
 }
 
-// Helper macro for simple config getters
-#define CONFIG_GETTER(func_name, return_type, field, default_val) \
-return_type func_name(void) { \
-    return_type value = default_val; \
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) { \
-        value = current_config.field; \
-        xSemaphoreGive(config_mutex); \
-    } \
-    return value; \
+//MARK: Individual Getters
+
+uint16_t config_get_screen_off_lux() {
+    return state.get_field(&system_config_t::screen_off_lux, DEFAULT_SCREEN_OFF_LUX);
 }
 
-// Helper macro for simple config setters
-#define CONFIG_SETTER(func_name, param_type, field) \
-esp_err_t func_name(param_type value) { \
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) { \
-        return ESP_ERR_TIMEOUT; \
-    } \
-    current_config.field = value; \
-    esp_err_t ret = save_config_to_nvs(); \
-    xSemaphoreGive(config_mutex); \
-    if (ret == ESP_OK) { \
-        apply_display_settings(); \
-    } \
-    return ret; \
+bool config_get_screen_enabled() {
+    return state.get_field(&system_config_t::screen_enabled, DEFAULT_SCREEN_ENABLED);
 }
 
-CONFIG_GETTER(config_get_screen_off_lux, uint16_t, screen_off_lux, DEFAULT_SCREEN_OFF_LUX)
-CONFIG_SETTER(config_set_screen_off_lux, uint16_t, screen_off_lux)
+uint8_t config_get_screen_brightness() {
+    return state.get_field(&system_config_t::screen_brightness, DEFAULT_SCREEN_BRIGHTNESS);
+}
 
-CONFIG_GETTER(config_get_screen_enabled, bool, screen_enabled, DEFAULT_SCREEN_ENABLED)
-CONFIG_SETTER(config_set_screen_enabled, bool, screen_enabled)
+bool config_get_auto_brightness_enabled() {
+    return state.get_field(&system_config_t::auto_brightness_enabled, DEFAULT_AUTO_BRIGHTNESS);
+}
 
-CONFIG_GETTER(config_get_screen_brightness, uint8_t, screen_brightness, DEFAULT_SCREEN_BRIGHTNESS)
-CONFIG_SETTER(config_set_screen_brightness, uint8_t, screen_brightness)
+//MARK: Individual Setters
 
-CONFIG_GETTER(config_get_auto_brightness_enabled, bool, auto_brightness_enabled, DEFAULT_AUTO_BRIGHTNESS)
-CONFIG_SETTER(config_set_auto_brightness_enabled, bool, auto_brightness_enabled)
-
-// Private helper functions
-
-static esp_err_t load_config_from_nvs(void) {
-    nvs_handle_t nvs_handle;
-    esp_err_t ret;
-
-    ret = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READONLY, &nvs_handle);
-    if (ret != ESP_OK) {
-        return ret;
+esp_err_t config_set_screen_off_lux(uint16_t value) {
+    if (!state.set_field(&system_config_t::screen_off_lux, value)) {
+        return ESP_ERR_TIMEOUT;
     }
-
-    size_t required_size;
-    uint8_t temp_uint8;
-
-    // Load screen enabled state
-    required_size = sizeof(uint8_t);
-    ret = nvs_get_blob(nvs_handle, NVS_CONFIG_SCREEN_ENABLE, &temp_uint8, &required_size);
+    esp_err_t ret = save_to_nvs();
     if (ret == ESP_OK) {
-        current_config.screen_enabled = (temp_uint8 != 0);
+        apply_display_settings();
     }
-
-    // Load screen brightness
-    required_size = sizeof(uint8_t);
-    ret = nvs_get_blob(nvs_handle, NVS_CONFIG_SCREEN_BRIGHTNESS, &current_config.screen_brightness, &required_size);
-    if (ret != ESP_OK) {
-        current_config.screen_brightness = DEFAULT_SCREEN_BRIGHTNESS;
-    }
-
-    // Load auto brightness enabled state
-    required_size = sizeof(uint8_t);
-    ret = nvs_get_blob(nvs_handle, NVS_CONFIG_AUTO_BRIGHTNESS, &temp_uint8, &required_size);
-    if (ret == ESP_OK) {
-        current_config.auto_brightness_enabled = (temp_uint8 != 0);
-    }
-
-    // Load auto brightness screen off lux threshold
-    required_size = sizeof(uint16_t);
-    ret = nvs_get_blob(nvs_handle, NVS_CONFIG_SCREEN_OFF_LUX, &current_config.screen_off_lux, &required_size);
-    if (ret != ESP_OK) {
-        current_config.screen_off_lux = DEFAULT_SCREEN_OFF_LUX;
-    }
-
-    nvs_close(nvs_handle);
-    return ESP_OK;
-}
-
-static esp_err_t save_config_to_nvs(void) {
-    nvs_handle_t nvs_handle;
-    esp_err_t ret;
-
-    ret = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Error opening NVS handle: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // Save screen enabled state
-    uint8_t temp_uint8 = current_config.screen_enabled ? 1 : 0;
-    ret = nvs_set_blob(nvs_handle, NVS_CONFIG_SCREEN_ENABLE, &temp_uint8, sizeof(uint8_t));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Error saving screen enable state: %s", esp_err_to_name(ret));
-        goto cleanup;
-    }
-
-    // Save screen brightness
-    ret = nvs_set_blob(nvs_handle, NVS_CONFIG_SCREEN_BRIGHTNESS, &current_config.screen_brightness, sizeof(uint8_t));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Error saving screen brightness: %s", esp_err_to_name(ret));
-        goto cleanup;
-    }
-
-    // Save auto brightness enabled state
-    temp_uint8 = current_config.auto_brightness_enabled ? 1 : 0;
-    ret = nvs_set_blob(nvs_handle, NVS_CONFIG_AUTO_BRIGHTNESS, &temp_uint8, sizeof(uint8_t));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Error saving auto brightness enable state: %s", esp_err_to_name(ret));
-        goto cleanup;
-    }
-
-    // Save auto brightness screen off lux threshold
-    ret = nvs_set_blob(nvs_handle, NVS_CONFIG_SCREEN_OFF_LUX, &current_config.screen_off_lux, sizeof(uint16_t));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Error saving screen off lux: %s", esp_err_to_name(ret));
-        goto cleanup;
-    }
-
-    // Commit changes
-    ret = nvs_commit(nvs_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Error committing to NVS: %s", esp_err_to_name(ret));
-    }
-
-cleanup:
-    nvs_close(nvs_handle);
     return ret;
 }
 
-static void light_sensor_event_handler(void* handler_args, esp_event_base_t base,
-    int32_t event_id, void* event_data) {
-    if (event_id != DAUGHTERBOARD_EVENT_LIGHT_READING) {
-        return;
-    }
-
-    light_reading_t* reading = (light_reading_t*)event_data;
-    if (reading == NULL) {
-        return;
-    }
-
-    bool auto_brightness_enabled = config_get_auto_brightness_enabled();
-    if (!auto_brightness_enabled) {
-        return;
-    }
-
-    ESP_LOGV(TAG, "Light sensor reading: %u lux", reading->lux);
-
-    // Determine if screen should be enabled based on light level
-    uint16_t screen_off_lux = config_get_screen_off_lux();
-    bool should_enable_screen = (reading->lux > screen_off_lux);
-    bool current_screen_enabled = config_get_screen_enabled();
-
-    if (should_enable_screen != current_screen_enabled) {
-        ESP_LOGI(TAG, "Auto brightness: %s screen due to light level %u lux",
-            should_enable_screen ? "enabling" : "disabling", reading->lux);
-
-        config_set_screen_enabled(should_enable_screen);
-    }
-}
-
-static void apply_display_settings(void) {
-    // Get current config values
-    bool screen_enabled = config_get_screen_enabled();
-    uint8_t brightness = config_get_screen_brightness();
-
-    if (screen_enabled) {
-        // Set brightness to configured value
-        display_set_brightness(brightness);
-        ESP_LOGV(TAG, "Applied display settings: enabled, brightness=%d", brightness);
-    }
-    else {
-        // Set brightness to 0 to turn off screen
-        display_set_brightness(0);
-        ESP_LOGV(TAG, "Applied display settings: disabled");
-    }
-}
-
-esp_err_t config_reset_to_defaults(void) {
-    if (xSemaphoreTake(config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+esp_err_t config_set_screen_enabled(bool value) {
+    if (!state.set_field(&system_config_t::screen_enabled, value)) {
         return ESP_ERR_TIMEOUT;
     }
-
-    // Reset to default values
-    current_config.screen_enabled = DEFAULT_SCREEN_ENABLED;
-    current_config.screen_brightness = DEFAULT_SCREEN_BRIGHTNESS;
-    current_config.auto_brightness_enabled = DEFAULT_AUTO_BRIGHTNESS;
-    current_config.screen_off_lux = DEFAULT_SCREEN_OFF_LUX;
-
-    // Erase the NVS namespace to clear all saved values
-    nvs_handle_t nvs_handle;
-    esp_err_t ret = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (ret == ESP_OK) {
-        nvs_erase_all(nvs_handle);
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-    }
-
-    // Save default config to NVS
-    ret = save_config_to_nvs();
-
-    xSemaphoreGive(config_mutex);
-
+    esp_err_t ret = save_to_nvs();
     if (ret == ESP_OK) {
         apply_display_settings();
+    }
+    return ret;
+}
+
+esp_err_t config_set_screen_brightness(uint8_t value) {
+    if (!state.set_field(&system_config_t::screen_brightness, value)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = save_to_nvs();
+    if (ret == ESP_OK) {
+        apply_display_settings();
+    }
+    return ret;
+}
+
+esp_err_t config_set_auto_brightness_enabled(bool value) {
+    if (!state.set_field(&system_config_t::auto_brightness_enabled, value)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t ret = save_to_nvs();
+    if (ret == ESP_OK) {
+        apply_display_settings();
+    }
+    return ret;
+}
+
+//MARK: Reset
+
+esp_err_t config_reset_to_defaults() {
+    esp_err_t ret;
+
+    {
+        raii::MutexGuard lock(state.mutex, pdMS_TO_TICKS(100));
+        if (!lock) {
+            return ESP_ERR_TIMEOUT;
+        }
+
+        state.config = {
+            .screen_enabled = DEFAULT_SCREEN_ENABLED,
+            .screen_brightness = DEFAULT_SCREEN_BRIGHTNESS,
+            .auto_brightness_enabled = DEFAULT_AUTO_BRIGHTNESS,
+            .screen_off_lux = DEFAULT_SCREEN_OFF_LUX
+        };
+
+        // Erase all config from NVS
+        kd::NvsHandle nvs(NVS_CONFIG_NAMESPACE, NVS_READWRITE);
+        if (nvs) {
+            nvs_erase_all(nvs.get());
+            nvs.commit();
+        }
+
+        ret = save_to_nvs();
+    }  // mutex released here
+
+    if (ret == ESP_OK) {
+        apply_display_settings_unlocked(DEFAULT_SCREEN_ENABLED, DEFAULT_SCREEN_BRIGHTNESS);
         ESP_LOGD(TAG, "Config reset to defaults");
     }
 

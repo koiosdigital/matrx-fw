@@ -25,9 +25,9 @@ extern "C" {
 
     // Default configuration values
 #define DEFAULT_SCREEN_ENABLED      true
-#define DEFAULT_SCREEN_BRIGHTNESS   255
+#define DEFAULT_SCREEN_BRIGHTNESS   static_cast<uint8_t>(255)
 #define DEFAULT_AUTO_BRIGHTNESS     false
-#define DEFAULT_SCREEN_OFF_LUX      1
+#define DEFAULT_SCREEN_OFF_LUX      static_cast<uint16_t>(1)
 
 /**
  * Initialize the config module
