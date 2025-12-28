@@ -10,9 +10,6 @@
 #define MAX_SCHEDULE_ITEMS 255
 #define UUID_SIZE_BYTES 16
 
-// Prepare window: request render this many ms before display time ends
-#define PREPARE_WINDOW_MS 3000
-
 // Render request timeout in ms
 #define RENDER_TIMEOUT_MS 5000
 
