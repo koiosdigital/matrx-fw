@@ -28,12 +28,17 @@ constexpr size_t MAX_PREPARE_REQUESTS = 5;               // Max items to prepare
 // Notification bits for scheduler task
 constexpr uint32_t NOTIFY_PREPARE = (1 << 0);
 constexpr uint32_t NOTIFY_ADVANCE = (1 << 1);
+constexpr uint32_t NOTIFY_RESUME_DISPLAY = (1 << 2);
+
+// Pin status overlay duration
+constexpr uint32_t PIN_STATUS_DURATION_MS = 1000;
 
 struct SchedulerState {
     ScheduleItem_t items[MAX_SCHEDULE_ITEMS] = {};
     TaskHandle_t task = nullptr;
     SemaphoreHandle_t mutex = nullptr;
     esp_timer_handle_t check_timer = nullptr;
+    esp_timer_handle_t pin_status_timer = nullptr;
 
     uint32_t current_item = 0;
     size_t item_count = 0;
@@ -47,6 +52,9 @@ struct SchedulerState {
     bool in_prepare_window = false;
     uint8_t prepared_uuids[MAX_PREPARE_REQUESTS][UUID_SIZE_BYTES] = {};
     size_t prepared_count = 0;
+
+    // Pin status overlay state
+    bool showing_pin_status = false;
 
     bool init() {
         mutex = xSemaphoreCreateMutex();
@@ -183,6 +191,16 @@ bool validate_webp(const uint8_t* data, size_t len) {
 
 // --- Core Logic ---
 
+// Check if any item in the schedule is displayable
+bool has_any_displayable() {
+    for (size_t i = 0; i < sched.item_count; i++) {
+        if (sched.is_displayable(sched.items[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Find the next displayable item index (wrapping around)
 int32_t find_next_displayable(uint32_t from_index) {
     for (size_t i = 1; i <= sched.item_count; i++) {
@@ -199,31 +217,40 @@ void handle_prepare() {
     if (sched.item_count == 0) return;
 
     // Find next items starting from current+1 and request renders
-    // Skip items that are already prepared (in this prepare window)
+    // Request server-skipped items too (they may have recovered)
+    // Continue past server-skipped items until we hit a normal item
     size_t prepared = 0;
-    for (size_t i = 1; i <= sched.item_count && prepared < MAX_PREPARE_REQUESTS; i++) {
+    bool found_normal = false;
+
+    for (size_t i = 1; i <= sched.item_count && prepared < MAX_PREPARE_REQUESTS && !found_normal; i++) {
         uint32_t idx = (sched.current_item + i) % sched.item_count;
         auto& item = sched.items[idx];
 
-        // Skip user-skipped items
+        // Skip user-skipped items entirely
         if (item.flags.skipped_user) continue;
 
-        // Skip server-skipped items (they returned empty/error)
-        if (item.flags.skipped_server) continue;
-
         // Skip already prepared items (in this prepare window only)
-        if (sched.is_uuid_prepared(item.uuid)) continue;
+        if (sched.is_uuid_prepared(item.uuid)) {
+            // If this was a normal item, stop searching
+            if (!item.flags.skipped_server) {
+                found_normal = true;
+            }
+            continue;
+        }
 
         // Request render (even if it already has data - get fresh data)
-        ESP_LOGI(TAG, "Prepare: requesting render for item %u (%02x%02x)",
-                 idx, item.uuid[0], item.uuid[1]);
+        ESP_LOGI(TAG, "Prepare: requesting render for item %u (%02x%02x)%s",
+                 idx, item.uuid[0], item.uuid[1],
+                 item.flags.skipped_server ? " (retry server-skipped)" : "");
         sched.request_render(item);
         sched.mark_uuid_prepared(item.uuid);
         prepared++;
 
-        // Stop after preparing the first non-skipped item
-        // (we only need to prepare the next item to display)
-        break;
+        // If this is a normal (non-server-skipped) item, we're done
+        if (!item.flags.skipped_server) {
+            found_normal = true;
+        }
+        // Otherwise continue to find more items (server-skipped items may fail again)
     }
 }
 
@@ -239,8 +266,16 @@ void handle_advance() {
     // Pinned: reset timer and request fresh render
     if (current.flags.pinned) {
         sched.display_start_tick = xTaskGetTickCount();
-        current.render_state = RenderState::NeedsRender;
         sched.clear_prepared();
+
+        // If pinned item is displayable, keep showing it
+        // Otherwise request fresh render (it may recover)
+        if (sched.is_displayable(current)) {
+            sched.display_current();
+        } else {
+            current.render_state = RenderState::NeedsRender;
+            display_clear();  // Blank screen while waiting for data
+        }
         return;
     }
 
@@ -253,6 +288,25 @@ void handle_advance() {
     }
 }
 
+// Pin status timer callback - fires after showing pinned/unpinned sprite
+void pin_status_timer_callback(void*) {
+    if (sched.task != nullptr) {
+        xTaskNotify(sched.task, NOTIFY_RESUME_DISPLAY, eSetBits);
+    }
+}
+
+// Show pin status sprite for 1 second, then resume normal display
+void show_pin_status(bool pinned) {
+    show_fs_sprite(pinned ? "pinned" : "unpinned");
+    sched.showing_pin_status = true;
+
+    // Start one-shot timer to resume display
+    if (sched.pin_status_timer != nullptr) {
+        esp_timer_stop(sched.pin_status_timer);
+        esp_timer_start_once(sched.pin_status_timer, PIN_STATUS_DURATION_MS * 1000);
+    }
+}
+
 // Timer callback - runs every 100ms to check timing
 void IRAM_ATTR check_timer_callback(void*) {
     if (!sched.running || !sched.has_valid_schedule || sched.item_count == 0) {
@@ -260,6 +314,9 @@ void IRAM_ATTR check_timer_callback(void*) {
     }
 
     if (sched.task == nullptr) return;
+
+    // Don't advance while showing pin status overlay
+    if (sched.showing_pin_status) return;
 
     // Check if display time expired -> notify advance
     if (sched.is_display_expired()) {
@@ -298,6 +355,10 @@ void scheduler_task_func(void*) {
 
         // Handle notifications
         if (got_notify == pdTRUE) {
+            if (notification & NOTIFY_RESUME_DISPLAY) {
+                sched.showing_pin_status = false;
+                sched.display_current();
+            }
             if (notification & NOTIFY_PREPARE) {
                 handle_prepare();
             }
@@ -313,8 +374,16 @@ void scheduler_task_func(void*) {
                 int32_t next = find_next_displayable(sched.current_item);
                 if (next >= 0) {
                     sched.advance_to(next);
+                } else {
+                    // No displayable items at all - blank the screen
+                    display_clear();
                 }
             }
+        }
+
+        // Also check if we have no displayable items at all (e.g., single pinned item that's server-skipped)
+        if (!has_any_displayable()) {
+            display_clear();
         }
     }
 }
@@ -351,6 +420,20 @@ void scheduler_init() {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start check timer: %s", esp_err_to_name(ret));
         return;
+    }
+
+    // Create pin status timer (one-shot, started when needed)
+    esp_timer_create_args_t pin_timer_args = {
+        .callback = pin_status_timer_callback,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "pin_status",
+        .skip_unhandled_events = true,
+    };
+
+    ret = esp_timer_create(&pin_timer_args, &sched.pin_status_timer);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create pin status timer: %s", esp_err_to_name(ret));
     }
 
     ESP_LOGI(TAG, "Scheduler initialized");
@@ -542,6 +625,7 @@ void scheduler_handle_button_next() {
     if (current.flags.pinned) {
         current.flags.pinned = false;
         sockets_send_modify_schedule_item(current.uuid, false, current.flags.skipped_user);
+        show_pin_status(false);
     }
 
     // Find next displayable item
@@ -564,6 +648,7 @@ void scheduler_handle_button_prev() {
     if (current.flags.pinned) {
         current.flags.pinned = false;
         sockets_send_modify_schedule_item(current.uuid, false, current.flags.skipped_user);
+        show_pin_status(false);
     }
 
     // Find previous displayable item (search backwards)
@@ -586,4 +671,5 @@ void scheduler_handle_button_pin() {
     current.flags.pinned = true;
     sched.display_start_tick = xTaskGetTickCount();
     sockets_send_modify_schedule_item(current.uuid, true, current.flags.skipped_user);
+    show_pin_status(true);
 }

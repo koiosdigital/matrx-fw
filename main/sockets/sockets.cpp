@@ -7,6 +7,7 @@
 #include <esp_wifi.h>
 #include <esp_timer.h>
 #include <esp_partition.h>
+#include <esp_app_desc.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -243,6 +244,9 @@ namespace {
 
         sockets_send_device_info();
 
+        // Upload coredump now that connection is fully established
+        upload_coredump_if_present();
+
         sock.needs_claimed = response->needs_claimed || !response->is_claimed;
 
         if (!sock.needs_claimed) {
@@ -360,11 +364,8 @@ namespace {
             sock.state = ConnectionState::Connected;
             show_fs_sprite("ready");
 
-            // Request schedule immediately
+            // Request schedule immediately - server will respond with JoinResponse first
             request_schedule();
-
-            // Upload coredump if present
-            upload_coredump_if_present();
             break;
 
         case WEBSOCKET_EVENT_DISCONNECTED:
@@ -383,15 +384,16 @@ namespace {
 
         case WEBSOCKET_EVENT_CLOSED:
             ESP_LOGI(TAG, "WebSocket closed (clean)");
-            sock.state = ConnectionState::Disconnected;
+            sock.state = ConnectionState::Connecting;  // Trigger reconnection
             sock.rx_buf.reset();
             show_fs_sprite("connecting");
             break;
 
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGE(TAG, "WebSocket error");
-            sock.state = ConnectionState::Disconnected;
+            sock.state = ConnectionState::Connecting;  // Trigger reconnection
             sock.rx_buf.reset();
+            show_fs_sprite("connecting");
             break;
 
         case WEBSOCKET_EVENT_DATA:
@@ -494,7 +496,7 @@ namespace {
 
         esp_websocket_client_config_t config = {};
         // TODO: Switch to production URI with mTLS
-        config.uri = "ws://192.168.0.206";
+        config.uri = "ws://192.168.0.245";
         config.port = 9091;
         // config.client_cert = sock.cert;
         // config.client_cert_len = sock.cert_len + 1;
@@ -559,9 +561,16 @@ namespace {
         if (!is_erased) {
             ESP_LOGI(TAG, "Uploading coredump (%zu bytes)", size);
 
+            const esp_app_desc_t* app_desc = esp_app_get_description();
+
             Kd__V1__UploadCoreDump upload = KD__V1__UPLOAD_CORE_DUMP__INIT;
             upload.core_dump.data = data;
             upload.core_dump.len = size;
+            upload.firmware_project = const_cast<char*>(app_desc->project_name);
+            upload.firmware_version = const_cast<char*>(app_desc->version);
+#ifdef FIRMWARE_VARIANT
+            upload.firmware_variant = const_cast<char*>(FIRMWARE_VARIANT);
+#endif
 
             Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
             message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
@@ -835,6 +844,12 @@ void sockets_send_modify_schedule_item(const uint8_t* uuid, bool pinned, bool sk
 
 void send_render_request_to_server(const uint8_t* uuid) {
     if (uuid == nullptr) return;
+
+    // Don't queue render requests when not connected
+    if (!sock.is_connected()) {
+        ESP_LOGD(TAG, "Skipping render request - not connected");
+        return;
+    }
 
     Kd__V1__SpriteRenderRequest request = KD__V1__SPRITE_RENDER_REQUEST__INIT;
     request.sprite_uuid.data = const_cast<uint8_t*>(uuid);
