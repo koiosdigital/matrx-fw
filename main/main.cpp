@@ -114,6 +114,24 @@ extern "C" void app_main(void)
 
     scheduler_init();
 
+    // Register button event handlers for scheduler
+    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED,
+        [](void*, esp_event_base_t, int32_t, void*) {
+            ESP_LOGI(TAG, "Button A event received");
+            scheduler_handle_button_prev();
+        }, nullptr);
+    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED,
+        [](void*, esp_event_base_t, int32_t, void*) {
+            ESP_LOGI(TAG, "Button B event received");
+            scheduler_handle_button_pin();
+        }, nullptr);
+    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED,
+        [](void*, esp_event_base_t, int32_t, void*) {
+            ESP_LOGI(TAG, "Button C event received");
+            scheduler_handle_button_next();
+        }, nullptr);
+    ESP_LOGI(TAG, "Button event handlers registered");
+
     ESP_LOGD(TAG, "post scheduler Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
     sockets_init();
 

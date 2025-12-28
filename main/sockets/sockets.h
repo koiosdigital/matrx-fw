@@ -5,27 +5,33 @@
 #include <stdlib.h>
 
 #define SOCKETS_URI "wss://device.api.koiosdigital.net"
+#define UUID_SIZE_BYTES 16
 
+// Initialize the sockets module (call once at startup)
 void sockets_init();
+
+// Deinitialize and clean up
 void sockets_deinit();
-void sockets_disconnect();
-void sockets_connect();
 
-void request_render(const uint8_t* schedule_item_uuid);
-void upload_coredump(uint8_t* core_dump, size_t core_dump_len);
+// Check if connected to server
+bool sockets_is_connected();
+
+// Request schedule from server
 void request_schedule();
-void attempt_coredump_upload();
 
-// Publish the current device configuration (protobuf-c) to the server.
-void sockets_send_device_config();
-
-// Send currently displaying update to the server.
+// Send currently displaying update to the server
 void sockets_send_currently_displaying(uint8_t* uuid);
 
-// Send device info to the server.
+// Send device info to the server
 void sockets_send_device_info();
 
-// Send modify schedule item to the server (pin/skip changes).
+// Send device configuration to the server
+void sockets_send_device_config();
+
+// Send modify schedule item to the server (pin/skip changes)
 void sockets_send_modify_schedule_item(const uint8_t* uuid, bool pinned, bool skipped);
+
+// Called by scheduler to send render requests
+void send_render_request_to_server(const uint8_t* uuid);
 
 #endif

@@ -10,46 +10,57 @@
 #define MAX_SCHEDULE_ITEMS 255
 #define UUID_SIZE_BYTES 16
 
-#define PREPARE_TIME 3000
+// Prepare window: request render this many ms before display time ends
+#define PREPARE_WINDOW_MS 3000
+
+// Render request timeout in ms
+#define RENDER_TIMEOUT_MS 5000
+
+// Render state for tracking requests
+enum class RenderState : uint8_t {
+    NeedsRender,      // No data, needs request
+    RenderPending,    // Request sent, waiting
+    HasData,          // Ready to display
+};
 
 typedef struct ScheduleFlags_t {
     unsigned pinned : 1;
     unsigned skipped_user : 1;
     unsigned skipped_server : 1;
-    unsigned display_time : 6;  // 0-63 seconds (max 1 minute)
+    unsigned display_time : 6;  // 0-63 seconds
 } ScheduleFlags_t;
 
 typedef struct ScheduleItem_t {
-    uint8_t uuid[16] = { 0 };
+    uint8_t uuid[UUID_SIZE_BYTES] = { 0 };
     ScheduleFlags_t flags = { 0 };
-    RAMSprite_t* sprite = NULL;
-    ScheduleItem_t* next = NULL;
+    RAMSprite_t* sprite = nullptr;
+    RenderState render_state = RenderState::NeedsRender;
+    TickType_t render_request_tick = 0;  // When request was sent
 } ScheduleItem_t;
 
+// Initialize the scheduler
 void scheduler_init();
+
+// Check if we have a valid schedule
 bool scheduler_has_schedule();
 
-ScheduleItem_t* find_schedule_item(uint8_t* schedule_item_uuid);
+// Set schedule from server response
 void scheduler_set_schedule(Kd__V1__MatrxSchedule* schedule_response);
 
-void scheduler_skip_schedule_item(uint8_t* schedule_item_uuid);
-void scheduler_skip_current_schedule_item();
-void scheduler_pin_schedule_item(uint8_t* schedule_item_uuid);
-void scheduler_pin_current_schedule_item();
-
-void scheduler_goto_next_item();
-void scheduler_goto_previous_item();
-
+// Clear all schedule data
 void scheduler_clear();
-void scheduler_stop();
+
+// Start/stop the scheduler
 void scheduler_start();
+void scheduler_stop();
 
-// Called when render data is received for a schedule item
-// If the item is currently being displayed, triggers a re-display
-void scheduler_notify_render_complete(const uint8_t* uuid);
+// Called when render data is received from server
+// Handles both success (data) and failure (server_skipped)
+void scheduler_handle_render_response(const uint8_t* uuid, const uint8_t* data, size_t len, bool server_error);
 
-// Called to update sprite data for a schedule item with proper locking
-// Returns true if item was found and updated, false otherwise
-bool scheduler_update_sprite_data(const uint8_t* uuid, const uint8_t* data, size_t len, bool set_server_skipped);
+// Button handlers
+void scheduler_handle_button_prev();   // A: unpin and go to previous
+void scheduler_handle_button_pin();    // B: pin current item
+void scheduler_handle_button_next();   // C: unpin and go to next
 
 #endif
