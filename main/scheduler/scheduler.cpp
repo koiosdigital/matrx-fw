@@ -156,13 +156,6 @@ struct SchedulerState {
         }
 
         ESP_LOGI(TAG, "advance_to: %lu -> %lu", current_item, index);
-
-        // Mark old item as needing re-render for next cycle (but only if different)
-        if (current_item != index && current_item < item_count && has_valid_uuid(items[current_item])) {
-            ESP_LOGI(TAG, "advance_to: marking old item %lu as NeedsRender", current_item);
-            items[current_item].render_state = RenderState::NeedsRender;
-        }
-
         current_item = index;
         display_start_tick = xTaskGetTickCount();
         display_current();
