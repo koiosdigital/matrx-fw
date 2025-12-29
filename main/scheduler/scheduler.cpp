@@ -444,6 +444,8 @@ void scheduler_on_connect() {
     // Enable display mode - NEED_NEXT events can now be emitted
     webp_player_set_display_mode(true);
 
+    msg_send_schedule_request();
+
     ESP_LOGI(TAG, "Connected - display mode enabled");
 }
 

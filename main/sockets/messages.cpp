@@ -10,7 +10,6 @@
 
 #include "apps.h"
 #include "config.h"
-#include "../components/kd_common/src/crypto.h"
 
 static const char* TAG = "messages";
 
@@ -193,34 +192,52 @@ void msg_send_schedule_request() {
     msg_queue(&msg);
 }
 
-void msg_send_cert_renewal_request() {
-    // Get CSR from crypto module
-    size_t csr_len = 4096;
-    auto* csr = static_cast<char*>(heap_caps_malloc(csr_len, MALLOC_CAP_SPIRAM));
-    if (csr == nullptr) {
-        ESP_LOGE(TAG, "Failed to allocate CSR buffer");
+void msg_send_cert_report() {
+    size_t cert_len = 0;
+    if (kd_common_get_device_cert(nullptr, &cert_len) != ESP_OK || cert_len == 0) {
+        ESP_LOGW(TAG, "No device certificate to report");
         return;
     }
 
-    esp_err_t err = crypto_get_csr(csr, &csr_len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get CSR: %s", esp_err_to_name(err));
-        heap_caps_free(csr);
+    auto* cert_buf = static_cast<uint8_t*>(heap_caps_malloc(cert_len, MALLOC_CAP_SPIRAM));
+    if (cert_buf == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate cert buffer");
         return;
     }
 
-    Kd__V1__RenewCertRequest req = KD__V1__RENEW_CERT_REQUEST__INIT;
-    req.csr.data = reinterpret_cast<uint8_t*>(csr);
+    if (kd_common_get_device_cert(reinterpret_cast<char*>(cert_buf), &cert_len) != ESP_OK) {
+        heap_caps_free(cert_buf);
+        return;
+    }
+
+    Kd__V1__CertReport report = KD__V1__CERT_REPORT__INIT;
+    report.current_cert.data = cert_buf;
+    report.current_cert.len = cert_len;
+
+    Kd__V1__MatrxMessage msg = KD__V1__MATRX_MESSAGE__INIT;
+    msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_CERT_REPORT;
+    msg.cert_report = &report;
+
+    msg_queue(&msg);
+    heap_caps_free(cert_buf);
+
+    ESP_LOGI(TAG, "Sent cert report (%zu bytes)", cert_len);
+}
+
+void msg_send_cert_renew_request(const char* csr, size_t csr_len) {
+    if (csr == nullptr || csr_len == 0) {
+        ESP_LOGE(TAG, "Invalid CSR");
+        return;
+    }
+
+    Kd__V1__CertRenewRequest req = KD__V1__CERT_RENEW_REQUEST__INIT;
+    req.csr.data = reinterpret_cast<uint8_t*>(const_cast<char*>(csr));
     req.csr.len = csr_len;
 
     Kd__V1__MatrxMessage msg = KD__V1__MATRX_MESSAGE__INIT;
-    msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_RENEW_CERT_REQUEST;
-    msg.renew_cert_request = &req;
+    msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RENEW_REQUEST;
+    msg.cert_renew_request = &req;
 
-    bool sent = msg_queue(&msg);
-    heap_caps_free(csr);
-
-    if (sent) {
-        ESP_LOGI(TAG, "Sent cert renewal request");
-    }
+    msg_queue(&msg);
+    ESP_LOGI(TAG, "Sent cert renew request");
 }

@@ -35,5 +35,8 @@ void msg_send_currently_displaying(const App_t* app);
 // Request schedule from server
 void msg_send_schedule_request();
 
+// Send current certificate to server for expiry check
+void msg_send_cert_report();
+
 // Send certificate renewal request with CSR
-void msg_send_cert_renewal_request();
+void msg_send_cert_renew_request(const char* csr, size_t csr_len);

@@ -18,7 +18,6 @@
 
 #include "apps.h"
 #include "scheduler.h"
-#include "../cert_renewal/cert_renewal.h"
 
 static const char* TAG = "sockets";
 
@@ -28,9 +27,9 @@ namespace {
     // Configuration
     //------------------------------------------------------------------------------
 
-    constexpr size_t QUEUE_SIZE = 4;
-    constexpr size_t MAX_MSG_SIZE = 100 * 1024;  // 100KB
-    constexpr int64_t QUEUE_POLL_US = 50 * 1000;  // 50ms timer for queue processing
+    constexpr size_t QUEUE_SIZE = 8;
+    constexpr size_t MAX_MSG_SIZE = 150 * 1024;  // 150KB
+    constexpr int64_t QUEUE_POLL_US = 100 * 1000;  // 100ms timer for queue processing
 
     //------------------------------------------------------------------------------
     // SPIRAM Allocator for Protobuf
@@ -96,23 +95,6 @@ namespace {
     // Timer to check crypto/OTA state periodically until ready
     esp_timer_handle_t state_check_timer = nullptr;
 
-    // Timer to retry cert renewal check once NTP syncs
-    esp_timer_handle_t cert_check_timer = nullptr;
-    constexpr int64_t CERT_CHECK_RETRY_US = 5 * 1000 * 1000;  // 5 seconds
-
-    void cert_check_timer_callback(void*) {
-        if (!sock.is_connected()) {
-            esp_timer_stop(cert_check_timer);
-            return;
-        }
-
-        if (kd_common_ntp_is_synced()) {
-            esp_timer_stop(cert_check_timer);
-            ESP_LOGI(TAG, "NTP synced, checking certificate");
-            cert_renewal_check();
-        }
-    }
-
     //------------------------------------------------------------------------------
     // Queue Processing (called by timer)
     //------------------------------------------------------------------------------
@@ -174,17 +156,8 @@ namespace {
             scheduler_on_connect();
             show_fs_sprite("ready");
             msg_send_device_info();
+            msg_send_cert_report();
             msg_send_schedule_request();
-
-            // Check cert if NTP is synced, otherwise start timer to wait for it
-            if (kd_common_ntp_is_synced()) {
-                cert_renewal_check();
-            }
-            else if (cert_check_timer) {
-                ESP_LOGI(TAG, "Waiting for NTP sync to check certificate");
-                esp_timer_start_periodic(cert_check_timer, CERT_CHECK_RETRY_US);
-            }
-
             start_queue_timer();
             break;
 
@@ -193,7 +166,6 @@ namespace {
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGW(TAG, "Disconnected/error (event=%ld)", event_id);
             stop_queue_timer();
-            if (cert_check_timer) esp_timer_stop(cert_check_timer);
             sock.rx_reset();
             sock.state = State::Ready;  // Will try to reconnect
             scheduler_on_disconnect();
@@ -254,8 +226,10 @@ namespace {
         }
 
         esp_websocket_client_config_t cfg = {};
-        cfg.uri = "ws://192.168.0.245:9091";
-        cfg.disable_auto_reconnect = false;
+        cfg.uri = "ws://192.168.0.112:9091";
+        cfg.reconnect_timeout_ms = 2500;
+        cfg.network_timeout_ms = 2500;
+        cfg.enable_close_reconnect = true;
 
         sock.client = esp_websocket_client_init(&cfg);
         if (!sock.client) return ESP_FAIL;
@@ -279,9 +253,14 @@ namespace {
             // Handled by IP event
             break;
 
-        case State::WaitingForCrypto:
-            if (kd_common_crypto_get_state() == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
+        case State::WaitingForCrypto: {
+            CryptoState_t crypto_state = kd_common_crypto_get_state();
+            ESP_LOGI(TAG, "WaitingForCrypto: crypto_state=%d (need=%d)",
+                static_cast<int>(crypto_state),
+                static_cast<int>(CryptoState_t::CRYPTO_STATE_VALID_CERT));
+            if (crypto_state == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
 #ifdef ENABLE_OTA
+                ESP_LOGI(TAG, "State -> WaitingForOTA");
                 sock.state = State::WaitingForOTA;
                 show_fs_sprite("check_updates");
                 try_advance_state();  // Check OTA immediately
@@ -291,10 +270,12 @@ namespace {
 #endif
             }
             break;
+        }
 
         case State::WaitingForOTA:
 #ifdef ENABLE_OTA
             if (kd_common_ota_has_completed_boot_check()) {
+                ESP_LOGI(TAG, "State -> Ready");
                 sock.state = State::Ready;
                 try_advance_state();
             }
@@ -321,14 +302,17 @@ namespace {
 
     void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void*) {
         if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+            ESP_LOGI(TAG, "WiFi disconnected event");
             if (sock.state != State::WaitingForNetwork) {
                 sock.state = State::WaitingForNetwork;
                 stop_queue_timer();
             }
         }
         else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+            ESP_LOGI(TAG, "Got IP event, state=%d", static_cast<int>(sock.state));
             if (sock.state == State::WaitingForNetwork) {
                 sock.state = State::WaitingForCrypto;
+                ESP_LOGI(TAG, "State -> WaitingForCrypto");
                 // Start state polling timer
                 if (state_check_timer) {
                     esp_timer_start_periodic(state_check_timer, 100 * 1000);  // 100ms
@@ -385,16 +369,6 @@ void sockets_init() {
     };
     esp_timer_create(&state_timer_args, &state_check_timer);
 
-    // Create cert check timer (for waiting on NTP sync)
-    esp_timer_create_args_t cert_timer_args = {
-        .callback = cert_check_timer_callback,
-        .arg = nullptr,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "cert_check",
-        .skip_unhandled_events = true,
-    };
-    esp_timer_create(&cert_timer_args, &cert_check_timer);
-
     // Register event handlers
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr);
@@ -416,11 +390,6 @@ void sockets_deinit() {
         esp_timer_stop(state_check_timer);
         esp_timer_delete(state_check_timer);
         state_check_timer = nullptr;
-    }
-    if (cert_check_timer) {
-        esp_timer_stop(cert_check_timer);
-        esp_timer_delete(cert_check_timer);
-        cert_check_timer = nullptr;
     }
     if (sock.queue_timer) {
         esp_timer_delete(sock.queue_timer);

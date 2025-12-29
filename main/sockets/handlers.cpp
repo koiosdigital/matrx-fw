@@ -4,11 +4,12 @@
 #include <esp_log.h>
 #include <kd_common.h>
 
+#include <esp_heap_caps.h>
+
 #include "display.h"
 #include "apps.h"
 #include "config.h"
 #include "scheduler.h"
-#include "../cert_renewal/cert_renewal.h"
 
 static const char* TAG = "handlers";
 
@@ -83,11 +84,63 @@ namespace {
         perform_factory_reset(reason);
     }
 
-    void handle_cert_response(Kd__V1__CertResponse* response) {
-        if (cert_renewal_handle_response(response)) {
-            ESP_LOGI(TAG, "Cert renewed, reconnect required");
-            // TODO: trigger reconnect
+    void handle_cert_renew_required(Kd__V1__CertRenewRequired* request) {
+        if (request != nullptr && request->reason != nullptr) {
+            ESP_LOGI(TAG, "Cert renewal required: %s", request->reason);
+        } else {
+            ESP_LOGI(TAG, "Cert renewal required");
         }
+
+        // Get CSR - it should already exist from provisioning
+        size_t csr_len = 0;
+        if (kd_common_get_csr(nullptr, &csr_len) != ESP_OK || csr_len == 0) {
+            ESP_LOGE(TAG, "No CSR available for renewal");
+            return;
+        }
+
+        auto* csr_buf = static_cast<char*>(heap_caps_malloc(csr_len + 1, MALLOC_CAP_SPIRAM));
+        if (csr_buf == nullptr) {
+            ESP_LOGE(TAG, "Failed to allocate CSR buffer");
+            return;
+        }
+
+        if (kd_common_get_csr(csr_buf, &csr_len) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to get CSR");
+            heap_caps_free(csr_buf);
+            return;
+        }
+        csr_buf[csr_len] = '\0';
+
+        msg_send_cert_renew_request(csr_buf, csr_len);
+        heap_caps_free(csr_buf);
+    }
+
+    void handle_cert_renew_response(Kd__V1__CertRenewResponse* response) {
+        if (response == nullptr) return;
+
+        if (!response->success) {
+            ESP_LOGE(TAG, "Cert renewal failed: %s",
+                response->error ? response->error : "unknown error");
+            return;
+        }
+
+        if (response->device_cert.data == nullptr || response->device_cert.len == 0) {
+            ESP_LOGE(TAG, "Cert renewal response missing certificate");
+            return;
+        }
+
+        ESP_LOGI(TAG, "Received new certificate (%zu bytes)", response->device_cert.len);
+
+        esp_err_t err = kd_common_set_device_cert(
+            reinterpret_cast<const char*>(response->device_cert.data),
+            response->device_cert.len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store new certificate: %s", esp_err_to_name(err));
+            return;
+        }
+
+        ESP_LOGI(TAG, "Certificate renewed successfully");
+        // Server will disconnect us to reconnect with new cert
     }
 
 }  // namespace
@@ -114,8 +167,11 @@ void handle_message(Kd__V1__MatrxMessage* message) {
     case KD__V1__MATRX_MESSAGE__MESSAGE_FACTORY_RESET_REQUEST:
         handle_factory_reset(message->factory_reset_request);
         break;
-    case KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RESPONSE:
-        handle_cert_response(message->cert_response);
+    case KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RENEW_REQUIRED:
+        handle_cert_renew_required(message->cert_renew_required);
+        break;
+    case KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RENEW_RESPONSE:
+        handle_cert_renew_response(message->cert_renew_response);
         break;
     default:
         ESP_LOGD(TAG, "Unhandled message: %d", message->message_case);
