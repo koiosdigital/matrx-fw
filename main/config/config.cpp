@@ -6,9 +6,12 @@
 #include <nvs_flash.h>
 #include <nvs.h>
 #include <esp_event.h>
+#include <esp_system.h>
+#include <esp_wifi.h>
 
 #include "display.h"
 #include "daughterboard.h"
+#include "sprites.h"
 #include "raii_utils.hpp"
 #include <nvs_handle.hpp>
 
@@ -400,4 +403,44 @@ esp_err_t config_reset_to_defaults() {
     }
 
     return ret;
+}
+
+void perform_factory_reset(const char* reason) {
+    if (reason != nullptr && reason[0] != '\0') {
+        ESP_LOGI(TAG, "Factory reset triggered: %s", reason);
+    } else {
+        ESP_LOGI(TAG, "Factory reset triggered");
+    }
+
+    show_fs_sprite("factory_reset_hold");
+
+    // Erase WiFi credentials
+    esp_err_t ret = esp_wifi_restore();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi credentials erased");
+    } else {
+        // Fallback: erase WiFi NVS namespace directly
+        nvs_handle_t nvs_handle;
+        if (nvs_open("nvs.net80211", NVS_READWRITE, &nvs_handle) == ESP_OK) {
+            nvs_erase_all(nvs_handle);
+            nvs_commit(nvs_handle);
+            nvs_close(nvs_handle);
+            ESP_LOGI(TAG, "WiFi NVS erased (fallback)");
+        }
+    }
+
+    // Erase config NVS namespace
+    nvs_handle_t nvs_handle;
+    if (nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
+        nvs_erase_all(nvs_handle);
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+        ESP_LOGI(TAG, "Config NVS erased");
+    }
+
+    show_fs_sprite("factory_reset_success");
+
+    // Wait 2 seconds on success screen, then restart
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
 }

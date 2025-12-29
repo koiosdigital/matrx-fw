@@ -34,4 +34,7 @@ void sockets_send_modify_schedule_item(const uint8_t* uuid, bool pinned, bool sk
 // Called by scheduler to send render requests
 void send_render_request_to_server(const uint8_t* uuid);
 
+// Request certificate renewal from server (sends CSR, receives new cert)
+void sockets_request_cert_renewal();
+
 #endif

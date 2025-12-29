@@ -15,7 +15,11 @@
 #include <freertos/semphr.h>
 
 #include <kd_common.h>
+#include "../components/kd_common/src/crypto.h"
 #include "display.h"
+
+#include <mbedtls/x509_crt.h>
+#include <time.h>
 #include "scheduler.h"
 #include "sprites.h"
 #include "config.h"
@@ -27,6 +31,34 @@
 static const char* TAG = "sockets";
 
 namespace {
+
+    //------------------------------------------------------------------------------
+    // Certificate Renewal Configuration
+    //------------------------------------------------------------------------------
+
+    // Check cert expiry every 24 hours (in milliseconds)
+    constexpr int64_t CERT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+    // Renew certificate when less than 1 year remaining (in seconds)
+    constexpr int64_t CERT_RENEWAL_THRESHOLD_SEC = 365 * 24 * 60 * 60;
+
+    //------------------------------------------------------------------------------
+    // SPIRAM Allocator for Protobuf
+    //------------------------------------------------------------------------------
+
+    void* spiram_alloc(void*, size_t size) {
+        return heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+    }
+
+    void spiram_free(void*, void* ptr) {
+        free(ptr);
+    }
+
+    ProtobufCAllocator spiram_allocator = {
+        .alloc = spiram_alloc,
+        .free = spiram_free,
+        .allocator_data = nullptr,
+    };
 
     // Configuration
     constexpr size_t OUTBOX_QUEUE_SIZE = 16;
@@ -133,6 +165,10 @@ namespace {
         bool needs_claimed = false;
         int64_t last_claim_attempt_ms = 0;
 
+        // Certificate renewal state
+        int64_t last_cert_check_ms = 0;
+        bool renewal_in_progress = false;
+
         // Certificate (cached)
         char* cert = nullptr;
         size_t cert_len = 0;
@@ -160,6 +196,94 @@ namespace {
     void process_inbox_message(const uint8_t* data, size_t len);
     void attempt_device_claim();
     void upload_coredump_if_present();
+    void check_certificate_renewal();
+
+    //------------------------------------------------------------------------------
+    // Certificate Expiry Checking
+    //------------------------------------------------------------------------------
+
+    // Returns seconds until cert expires, or -1 on error
+    int64_t get_cert_seconds_until_expiry() {
+        if (sock.cert == nullptr || sock.cert_len == 0) {
+            return -1;
+        }
+
+        mbedtls_x509_crt crt;
+        mbedtls_x509_crt_init(&crt);
+
+        int ret = mbedtls_x509_crt_parse(&crt,
+            reinterpret_cast<const unsigned char*>(sock.cert),
+            sock.cert_len + 1);  // +1 for null terminator
+
+        if (ret != 0) {
+            ESP_LOGE(TAG, "Failed to parse certificate: -0x%04X", -ret);
+            mbedtls_x509_crt_free(&crt);
+            return -1;
+        }
+
+        // Get current time
+        time_t now;
+        time(&now);
+
+        // Convert mbedtls time to time_t
+        struct tm expiry_tm = {};
+        expiry_tm.tm_year = crt.valid_to.year - 1900;
+        expiry_tm.tm_mon = crt.valid_to.mon - 1;
+        expiry_tm.tm_mday = crt.valid_to.day;
+        expiry_tm.tm_hour = crt.valid_to.hour;
+        expiry_tm.tm_min = crt.valid_to.min;
+        expiry_tm.tm_sec = crt.valid_to.sec;
+
+        time_t expiry = mktime(&expiry_tm);
+
+        mbedtls_x509_crt_free(&crt);
+
+        if (expiry == (time_t)-1) {
+            ESP_LOGE(TAG, "Failed to convert expiry time");
+            return -1;
+        }
+
+        int64_t seconds_remaining = static_cast<int64_t>(difftime(expiry, now));
+        return seconds_remaining;
+    }
+
+    void check_certificate_renewal() {
+        if (!sock.is_connected()) return;
+        if (sock.renewal_in_progress) return;
+
+        // Check if we have a valid system time (after 2024)
+        time_t now;
+        time(&now);
+        struct tm* tm_now = localtime(&now);
+        if (tm_now == nullptr || tm_now->tm_year < 124) {  // 124 = 2024 - 1900
+            ESP_LOGD(TAG, "System time not set, skipping cert expiry check");
+            return;
+        }
+
+        int64_t now_ms = esp_timer_get_time() / 1000;
+
+        // Only check periodically
+        if (sock.last_cert_check_ms > 0 &&
+            (now_ms - sock.last_cert_check_ms) < CERT_CHECK_INTERVAL_MS) {
+            return;
+        }
+        sock.last_cert_check_ms = now_ms;
+
+        int64_t seconds_remaining = get_cert_seconds_until_expiry();
+        if (seconds_remaining < 0) {
+            ESP_LOGW(TAG, "Could not determine certificate expiry");
+            return;
+        }
+
+        int64_t days_remaining = seconds_remaining / (24 * 60 * 60);
+        ESP_LOGI(TAG, "Certificate expires in %lld days", days_remaining);
+
+        if (seconds_remaining <= CERT_RENEWAL_THRESHOLD_SEC) {
+            ESP_LOGI(TAG, "Certificate expiring soon, requesting renewal");
+            sock.renewal_in_progress = true;
+            sockets_request_cert_renewal();
+        }
+    }
 
     //------------------------------------------------------------------------------
     // Message Handlers
@@ -257,8 +381,57 @@ namespace {
         }
     }
 
+    void handle_cert_response(Kd__V1__CertResponse* response) {
+        sock.renewal_in_progress = false;
+
+        if (response == nullptr) return;
+
+        if (!response->success) {
+            ESP_LOGE(TAG, "Cert renewal failed: %s",
+                response->error ? response->error : "unknown error");
+            return;
+        }
+
+        if (response->device_cert.data == nullptr || response->device_cert.len == 0) {
+            ESP_LOGE(TAG, "Cert renewal response missing certificate");
+            return;
+        }
+
+        ESP_LOGI(TAG, "Received new certificate (%zu bytes)", response->device_cert.len);
+
+        // Store the new certificate
+        esp_err_t err = crypto_set_device_cert(
+            reinterpret_cast<char*>(response->device_cert.data),
+            response->device_cert.len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store new certificate: %s", esp_err_to_name(err));
+            return;
+        }
+
+        ESP_LOGI(TAG, "Certificate stored successfully, resetting connection");
+
+        // Clear cached certificate so it's reloaded on next connect
+        sock.cleanup_cert();
+
+        // Reset cert check timer so we check again after reconnect
+        sock.last_cert_check_ms = 0;
+
+        // Stop and destroy current WebSocket client
+        if (sock.client != nullptr) {
+            esp_websocket_client_stop(sock.client);
+            esp_websocket_client_destroy(sock.client);
+            sock.client = nullptr;
+        }
+
+        // Reset receive buffer
+        sock.rx_buf.reset();
+
+        // Trigger reconnection with new certificate
+        sock.state = ConnectionState::Connecting;
+    }
+
     void process_inbox_message(const uint8_t* data, size_t len) {
-        auto* message = kd__v1__matrx_message__unpack(nullptr, len, data);
+        auto* message = kd__v1__matrx_message__unpack(&spiram_allocator, len, data);
         if (message == nullptr) {
             ESP_LOGE(TAG, "Failed to unpack message (%zu bytes)", len);
             return;
@@ -280,12 +453,27 @@ namespace {
         case KD__V1__MATRX_MESSAGE__MESSAGE_JOIN_RESPONSE:
             handle_join_response(message->join_response);
             break;
+        case KD__V1__MATRX_MESSAGE__MESSAGE_FACTORY_RESET_REQUEST:
+            {
+                const char* reason = nullptr;
+                if (message->factory_reset_request != nullptr &&
+                    message->factory_reset_request->reason != nullptr) {
+                    reason = message->factory_reset_request->reason;
+                }
+                ESP_LOGI(TAG, "Received factory reset request from server");
+                kd__v1__matrx_message__free_unpacked(message, &spiram_allocator);
+                perform_factory_reset(reason);  // Does not return
+            }
+            break;
+        case KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RESPONSE:
+            handle_cert_response(message->cert_response);
+            break;
         default:
             ESP_LOGD(TAG, "Unhandled message type: %d", message->message_case);
             break;
         }
 
-        kd__v1__matrx_message__free_unpacked(message, nullptr);
+        kd__v1__matrx_message__free_unpacked(message, &spiram_allocator);
     }
 
     //------------------------------------------------------------------------------
@@ -475,16 +663,17 @@ namespace {
             sock.client = nullptr;
         }
 
-        // Load certificate if not cached
+        // Load certificate if not cached (supports fullchain with intermediates)
+        constexpr size_t CERT_BUFFER_SIZE = 12288;  // 12KB for fullchain
         if (sock.cert == nullptr) {
             sock.ds_ctx = kd_common_crypto_get_ctx();
-            sock.cert = static_cast<char*>(heap_caps_calloc(4096, sizeof(char), MALLOC_CAP_SPIRAM));
+            sock.cert = static_cast<char*>(heap_caps_calloc(CERT_BUFFER_SIZE, sizeof(char), MALLOC_CAP_SPIRAM));
             if (sock.cert == nullptr) {
                 ESP_LOGE(TAG, "Failed to allocate certificate buffer");
                 return ESP_ERR_NO_MEM;
             }
 
-            sock.cert_len = 4096;
+            sock.cert_len = CERT_BUFFER_SIZE;
             esp_err_t ret = kd_common_get_device_cert(sock.cert, &sock.cert_len);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to get device certificate: %s", esp_err_to_name(ret));
@@ -702,6 +891,7 @@ namespace {
 
                 if (sock.is_connected()) {
                     attempt_device_claim();
+                    check_certificate_renewal();
                 }
             }
 
@@ -862,4 +1052,41 @@ void send_render_request_to_server(const uint8_t* uuid) {
     message.sprite_render_request = &request;
 
     queue_outbound_message(&message);
+}
+
+void sockets_request_cert_renewal() {
+    if (!sock.is_connected()) {
+        ESP_LOGW(TAG, "Cannot request cert renewal - not connected");
+        return;
+    }
+
+    // Get CSR from crypto storage
+    constexpr size_t CSR_BUFFER_SIZE = 4096;
+    auto* csr_buf = static_cast<char*>(heap_caps_malloc(CSR_BUFFER_SIZE, MALLOC_CAP_SPIRAM));
+    if (csr_buf == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate CSR buffer");
+        return;
+    }
+
+    size_t csr_len = CSR_BUFFER_SIZE;
+    esp_err_t err = crypto_get_csr(csr_buf, &csr_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get CSR: %s", esp_err_to_name(err));
+        heap_caps_free(csr_buf);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Sending cert renewal request with CSR (%zu bytes)", csr_len);
+
+    Kd__V1__RenewCertRequest request = KD__V1__RENEW_CERT_REQUEST__INIT;
+    request.csr.data = reinterpret_cast<uint8_t*>(csr_buf);
+    request.csr.len = csr_len;
+
+    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
+    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_RENEW_CERT_REQUEST;
+    message.renew_cert_request = &request;
+
+    queue_outbound_message(&message);
+
+    heap_caps_free(csr_buf);
 }

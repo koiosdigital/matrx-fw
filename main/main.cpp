@@ -66,31 +66,8 @@ extern "C" void app_main(void)
             hold_duration_ms += check_interval_ms;
         }
 
-        // If held for full duration, perform factory reset
-        ESP_LOGI(TAG, "Factory reset triggered!");
-
-        // Erase WiFi NVS namespace directly (WiFi not initialized yet, can't use esp_wifi_restore)
-        nvs_handle_t nvs_handle;
-        if (nvs_open("nvs.net80211", NVS_READWRITE, &nvs_handle) == ESP_OK) {
-            nvs_erase_all(nvs_handle);
-            nvs_commit(nvs_handle);
-            nvs_close(nvs_handle);
-            ESP_LOGI(TAG, "WiFi NVS erased");
-        }
-
-        // Erase config NVS namespace directly (config_init not called yet, so no mutex)
-        if (nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
-            nvs_erase_all(nvs_handle);
-            nvs_commit(nvs_handle);
-            nvs_close(nvs_handle);
-            ESP_LOGI(TAG, "Config NVS erased");
-        }
-
-        show_fs_sprite("factory_reset_success");
-
-        // Wait 2 seconds on reset ok screen, then restart
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        esp_restart();
+        // Perform factory reset (WiFi not initialized yet, will use NVS fallback)
+        perform_factory_reset("button hold");
     }
 
     kd_common_set_provisioning_pop_token_format(ProvisioningPOPTokenFormat_t::NUMERIC_6);

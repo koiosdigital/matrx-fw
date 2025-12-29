@@ -95,6 +95,15 @@ extern "C" {
      */
     esp_err_t config_reset_to_defaults(void);
 
+    /**
+     * Perform a full factory reset.
+     * Erases WiFi credentials, config NVS, and restarts the device.
+     * This function does not return.
+     *
+     * @param reason Optional reason string for logging (can be NULL)
+     */
+    void perform_factory_reset(const char* reason);
+
 #ifdef __cplusplus
 }
 #endif
