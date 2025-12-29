@@ -19,19 +19,25 @@ extern void send_render_request_to_server(const uint8_t* uuid);
 
 namespace {
 
+// Timing constants
 constexpr uint64_t SCHEDULE_REFRESH_MS = 5 * 60 * 1000;  // 5 minutes
 constexpr uint64_t CHECK_INTERVAL_US = 100 * 1000;       // 100ms in microseconds
 constexpr uint32_t PREPARE_WINDOW_MS = 3000;             // 3 seconds before display ends
+constexpr uint32_t PIN_STATUS_DURATION_MS = 1000;        // Pin/unpin overlay duration
+constexpr uint32_t TASK_NOTIFY_WAIT_MS = 1000;           // Scheduler task main loop wait
+
+// Size constants
 constexpr size_t MIN_WEBP_SIZE = 12;
 constexpr size_t MAX_PREPARE_REQUESTS = 5;               // Max items to prepare at once
+
+// Task configuration
+constexpr uint32_t SCHEDULER_TASK_STACK_SIZE = 3072;
+constexpr UBaseType_t SCHEDULER_TASK_PRIORITY = 5;
 
 // Notification bits for scheduler task
 constexpr uint32_t NOTIFY_PREPARE = (1 << 0);
 constexpr uint32_t NOTIFY_ADVANCE = (1 << 1);
 constexpr uint32_t NOTIFY_RESUME_DISPLAY = (1 << 2);
-
-// Pin status overlay duration
-constexpr uint32_t PIN_STATUS_DURATION_MS = 1000;
 
 struct SchedulerState {
     ScheduleItem_t items[MAX_SCHEDULE_ITEMS] = {};
@@ -216,6 +222,19 @@ int32_t find_next_displayable(uint32_t from_index) {
 void handle_prepare() {
     if (sched.item_count == 0) return;
 
+    auto& current = sched.items[sched.current_item];
+
+    // For pinned items or single-item schedules, re-request the current item
+    if (current.flags.pinned || sched.item_count == 1) {
+        if (!current.flags.skipped_user && !sched.is_uuid_prepared(current.uuid)) {
+            ESP_LOGI(TAG, "Prepare: requesting render for current item %u (%02x%02x) (pinned/single)",
+                     sched.current_item, current.uuid[0], current.uuid[1]);
+            sched.request_render(current);
+            sched.mark_uuid_prepared(current.uuid);
+        }
+        return;
+    }
+
     // Find next items starting from current+1 and request renders
     // Request server-skipped items too (they may have recovered)
     // Continue past server-skipped items until we hit a normal item
@@ -337,7 +356,7 @@ void scheduler_task_func(void*) {
     while (true) {
         // Wait for notifications with timeout for schedule refresh
         uint32_t notification = 0;
-        BaseType_t got_notify = xTaskNotifyWait(0, UINT32_MAX, &notification, pdMS_TO_TICKS(1000));
+        BaseType_t got_notify = xTaskNotifyWait(0, UINT32_MAX, &notification, pdMS_TO_TICKS(TASK_NOTIFY_WAIT_MS));
 
         if (!sched.running) continue;
 
@@ -399,7 +418,12 @@ void scheduler_init() {
     }
 
     // Create scheduler task
-    xTaskCreate(scheduler_task_func, "scheduler", 3072, nullptr, 5, &sched.task);
+    BaseType_t task_ret = xTaskCreate(scheduler_task_func, "scheduler",
+        SCHEDULER_TASK_STACK_SIZE, nullptr, SCHEDULER_TASK_PRIORITY, &sched.task);
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create scheduler task");
+        return;
+    }
 
     // Create check timer (100ms periodic)
     esp_timer_create_args_t timer_args = {

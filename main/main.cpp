@@ -103,5 +103,5 @@ extern "C" void app_main(void)
     sockets_init();
 
     ESP_LOGD(TAG, "post sockets Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
-    vTaskSuspend(NULL);
+    vTaskSuspend(nullptr);
 }

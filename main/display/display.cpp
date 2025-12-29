@@ -12,7 +12,6 @@
 #include <protocomm_ble.h>
 
 #include <webp/demux.h>
-#include <qrcode.h>
 #include <kd_common.h>
 #include "sprites.h"
 
@@ -24,10 +23,19 @@ static const char* TAG = "display";
 
 namespace {
 
-    // Constants
+    // Decoder constants
     constexpr int DECODER_RETRY_COUNT = 3;
     constexpr int DECODER_RETRY_DELAY_MS = 200;
     constexpr int SINGLE_FRAME_DELAY_MS = 1000;
+
+    // Task configuration
+    constexpr uint32_t DECODER_TASK_STACK_SIZE = 4096;
+    constexpr UBaseType_t DECODER_TASK_PRIORITY = 10;
+    constexpr BaseType_t DECODER_TASK_CORE = 1;
+
+    // Timing constants
+    constexpr TickType_t MUTEX_TIMEOUT_TICKS = pdMS_TO_TICKS(100);
+    constexpr TickType_t BOOT_SPRITE_DELAY_MS = 1200;
 
     // Encapsulated display state
     struct DisplayState {
@@ -125,7 +133,7 @@ namespace {
                 }
             }
 
-            raii::MutexGuard lock(disp.webp_semaphore, pdMS_TO_TICKS(100));
+            raii::MutexGuard lock(disp.webp_semaphore, MUTEX_TIMEOUT_TICKS);
             if (!lock) continue;
 
             // Check if decoder was destroyed
@@ -238,7 +246,7 @@ namespace {
     void display_pop_code() {
         char* pop_token = kd_common_provisioning_get_pop_token();
         if (pop_token == nullptr) {
-            ESP_LOGE(TAG, "POP token is NULL");
+            ESP_LOGE(TAG, "POP token is null");
             return;
         }
 
@@ -344,10 +352,17 @@ void display_init() {
     disp.dma_display->fillScreenRGB888(0, 0, 0);
 #endif
 
-    disp.init_semaphore();
+    if (!disp.init_semaphore()) {
+        ESP_LOGE(TAG, "Failed to create display semaphore");
+        return;
+    }
 
-    xTaskCreatePinnedToCore(decoder_task_func, "decoder", 4096, nullptr, 10,
-        &disp.decoder_task, 1);
+    BaseType_t task_ret = xTaskCreatePinnedToCore(decoder_task_func, "decoder",
+        DECODER_TASK_STACK_SIZE, nullptr, DECODER_TASK_PRIORITY, &disp.decoder_task, DECODER_TASK_CORE);
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create decoder task");
+        return;
+    }
 
     // Register event handlers for provisioning display states
     esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, ESP_EVENT_ANY_ID,
@@ -358,7 +373,7 @@ void display_init() {
         wifi_event_handler, nullptr);
 
     show_fs_sprite("boot");
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    vTaskDelay(pdMS_TO_TICKS(BOOT_SPRITE_DELAY_MS));
 }
 
 esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
@@ -423,7 +438,7 @@ void display_clear() {
         disp.dma_display->fillScreenRGB888(0, 0, 0);
     }
 #endif
-}
+    }
 
 void display_set_brightness(uint8_t brightness) {
 #if DISPLAY_ENABLED
@@ -433,7 +448,7 @@ void display_set_brightness(uint8_t brightness) {
 #else
     ESP_LOGW(TAG, "Display is not enabled, cannot set brightness");
 #endif
-}
+    }
 
 void display_clear_status_bar() {
     disp.status_bar.enabled = false;

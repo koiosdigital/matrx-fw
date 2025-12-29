@@ -60,15 +60,32 @@ namespace {
         .allocator_data = nullptr,
     };
 
-    // Configuration
+    // Queue configuration
     constexpr size_t OUTBOX_QUEUE_SIZE = 16;
     constexpr size_t INBOX_QUEUE_SIZE = 8;
     constexpr size_t MAX_MESSAGE_SIZE = 150 * 1024;  // 150KB max for large sprite data
+
+    // Task configuration
+    constexpr uint32_t SOCKETS_TASK_STACK_SIZE = 4096;
+    constexpr UBaseType_t SOCKETS_TASK_PRIORITY = 5;
+    constexpr BaseType_t SOCKETS_TASK_CORE = 1;
+
+    // Timing constants
     constexpr int SEND_TIMEOUT_MS = 10000;
     constexpr int RECONNECT_TIMEOUT_MS = 5000;
     constexpr int PING_INTERVAL_SEC = 30;
     constexpr int64_t CLAIM_RETRY_INTERVAL_MS = 5000;
+    constexpr TickType_t QUEUE_SEND_TIMEOUT_TICKS = pdMS_TO_TICKS(100);
+    constexpr TickType_t MAIN_LOOP_DELAY_MS = 50;
+    constexpr TickType_t PERIODIC_CHECK_INTERVAL_MS = 5000;
+    constexpr TickType_t STATE_POLL_DELAY_MS = 500;
+    constexpr int NETWORK_TIMEOUT_MS = 10000;
+
+    // Buffer sizes
     constexpr size_t CLAIM_TOKEN_MAX_LEN = 2048;
+    constexpr size_t CERT_BUFFER_SIZE = 12288;  // 12KB for fullchain
+    constexpr size_t CSR_BUFFER_SIZE = 4096;
+    constexpr size_t WEBSOCKET_BUFFER_SIZE = 4096;
 
     // Connection state
     enum class ConnectionState : uint8_t {
@@ -493,7 +510,7 @@ namespace {
         kd__v1__matrx_message__pack(message, buf);
 
         QueuedMessage msg = { buf, len };
-        if (xQueueSend(sock.outbox, &msg, pdMS_TO_TICKS(100)) != pdTRUE) {
+        if (xQueueSend(sock.outbox, &msg, QUEUE_SEND_TIMEOUT_TICKS) != pdTRUE) {
             ESP_LOGW(TAG, "Outbox full, dropping message");
             free(buf);
             return false;
@@ -664,7 +681,6 @@ namespace {
         }
 
         // Load certificate if not cached (supports fullchain with intermediates)
-        constexpr size_t CERT_BUFFER_SIZE = 12288;  // 12KB for fullchain
         if (sock.cert == nullptr) {
             sock.ds_ctx = kd_common_crypto_get_ctx();
             sock.cert = static_cast<char*>(heap_caps_calloc(CERT_BUFFER_SIZE, sizeof(char), MALLOC_CAP_SPIRAM));
@@ -692,10 +708,10 @@ namespace {
         // config.client_ds_data = sock.ds_ctx;
         // config.crt_bundle_attach = esp_crt_bundle_attach;
         config.reconnect_timeout_ms = RECONNECT_TIMEOUT_MS;
-        config.network_timeout_ms = 10000;
+        config.network_timeout_ms = NETWORK_TIMEOUT_MS;
         config.ping_interval_sec = PING_INTERVAL_SEC;
         config.disable_auto_reconnect = false;
-        config.buffer_size = 4096;
+        config.buffer_size = WEBSOCKET_BUFFER_SIZE;
 
         sock.client = esp_websocket_client_init(&config);
         if (sock.client == nullptr) {
@@ -798,7 +814,7 @@ namespace {
             // State machine
             switch (sock.state) {
             case ConnectionState::WaitingForNetwork:
-                vTaskDelay(pdMS_TO_TICKS(500));
+                vTaskDelay(pdMS_TO_TICKS(STATE_POLL_DELAY_MS));
                 continue;
 
             case ConnectionState::WaitingForCrypto:
@@ -812,7 +828,7 @@ namespace {
 #endif
                 }
                 else {
-                    vTaskDelay(pdMS_TO_TICKS(500));
+                    vTaskDelay(pdMS_TO_TICKS(STATE_POLL_DELAY_MS));
                 }
                 continue;
 
@@ -823,7 +839,7 @@ namespace {
                     sock.state = ConnectionState::Connecting;
                 }
                 else {
-                    vTaskDelay(pdMS_TO_TICKS(500));
+                    vTaskDelay(pdMS_TO_TICKS(STATE_POLL_DELAY_MS));
                 }
 #else
                 sock.state = ConnectionState::Connecting;
@@ -886,7 +902,7 @@ namespace {
             // Periodic tasks (when connected)
             static TickType_t last_periodic = 0;
             TickType_t now = xTaskGetTickCount();
-            if (now - last_periodic >= pdMS_TO_TICKS(5000)) {
+            if (now - last_periodic >= pdMS_TO_TICKS(PERIODIC_CHECK_INTERVAL_MS)) {
                 last_periodic = now;
 
                 if (sock.is_connected()) {
@@ -895,7 +911,7 @@ namespace {
                 }
             }
 
-            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(MAIN_LOOP_DELAY_MS));
         }
     }
 
@@ -925,7 +941,8 @@ void sockets_init() {
     }
 
     BaseType_t ret = xTaskCreatePinnedToCore(
-        sockets_task, "sockets", 4096, nullptr, 5, &sock.task, 1);
+        sockets_task, "sockets", SOCKETS_TASK_STACK_SIZE, nullptr,
+        SOCKETS_TASK_PRIORITY, &sock.task, SOCKETS_TASK_CORE);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create sockets task");
     }
@@ -1061,7 +1078,6 @@ void sockets_request_cert_renewal() {
     }
 
     // Get CSR from crypto storage
-    constexpr size_t CSR_BUFFER_SIZE = 4096;
     auto* csr_buf = static_cast<char*>(heap_caps_malloc(CSR_BUFFER_SIZE, MALLOC_CAP_SPIRAM));
     if (csr_buf == nullptr) {
         ESP_LOGE(TAG, "Failed to allocate CSR buffer");
