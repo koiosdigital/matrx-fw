@@ -1,9 +1,10 @@
+// Display - Pure hardware layer for HUB75 LED matrix
 #include "display.h"
 #include "pinout.h"
+#include "webp_player.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/queue.h>
 
 #include <esp_log.h>
 #include <esp_event.h>
@@ -11,92 +12,22 @@
 #include <wifi_provisioning/manager.h>
 #include <protocomm_ble.h>
 
-#include <webp/demux.h>
 #include <kd_common.h>
-#include "sprites.h"
+#include <esp_heap_caps.h>
 
 #include <cstring>
-
-#include "raii_utils.hpp"
 
 static const char* TAG = "display";
 
 namespace {
 
-    // Decoder constants
-    constexpr int DECODER_RETRY_COUNT = 3;
-    constexpr int DECODER_RETRY_DELAY_MS = 200;
-    constexpr int SINGLE_FRAME_DELAY_MS = 1000;
-
-    // Task configuration
-    constexpr uint32_t DECODER_TASK_STACK_SIZE = 4096;
-    constexpr UBaseType_t DECODER_TASK_PRIORITY = 10;
-    constexpr BaseType_t DECODER_TASK_CORE = 1;
-
     // Timing constants
-    constexpr TickType_t MUTEX_TIMEOUT_TICKS = pdMS_TO_TICKS(100);
     constexpr TickType_t BOOT_SPRITE_DELAY_MS = 1200;
 
-    // Encapsulated display state
+    // Display state
     struct DisplayState {
         MatrixPanel_I2S_DMA* dma_display = nullptr;
-        TaskHandle_t decoder_task = nullptr;
-        SemaphoreHandle_t webp_semaphore = nullptr;
-
-        // WebP decoder state
-        WebPData webp_data = { nullptr, 0 };
-        WebPAnimDecoder* decoder = nullptr;
-        WebPAnimInfo anim_info = {};
-
-        // Status bar overlay
         DisplayStatusBar_t status_bar = { false, 0, 0, 0 };
-
-        bool init_semaphore() {
-            webp_semaphore = xSemaphoreCreateMutex();
-            return webp_semaphore != nullptr;
-        }
-
-        void destroy_decoder() {
-            if (decoder == nullptr) return;
-
-            raii::MutexGuard lock(webp_semaphore);
-            if (lock && decoder != nullptr) {
-                WebPAnimDecoderDelete(decoder);
-                decoder = nullptr;
-            }
-        }
-
-        esp_err_t start_decoder() {
-            destroy_decoder();
-
-            if (webp_data.bytes == nullptr || webp_data.size == 0) {
-                ESP_LOGE(TAG, "no sprite data");
-                return ESP_ERR_INVALID_ARG;
-            }
-
-            raii::MutexGuard lock(webp_semaphore);
-            if (!lock) {
-                ESP_LOGE(TAG, "failed to take semaphore for decoder start");
-                return ESP_ERR_TIMEOUT;
-            }
-
-            decoder = WebPAnimDecoderNew(&webp_data, nullptr);
-            if (decoder == nullptr) {
-                ESP_LOGE(TAG, "failed to create WebP decoder");
-                return ESP_FAIL;
-            }
-
-            if (!WebPAnimDecoderGetInfo(decoder, &anim_info)) {
-                ESP_LOGE(TAG, "failed to get WebP animation info");
-                WebPAnimDecoderDelete(decoder);
-                decoder = nullptr;
-                return ESP_FAIL;
-            }
-
-            xTaskNotify(decoder_task, static_cast<uint32_t>(WebPTaskNotification_t::WEBP_START),
-                eSetValueWithOverwrite);
-            return ESP_OK;
-        }
     };
 
     DisplayState disp;
@@ -114,103 +45,6 @@ namespace {
         {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}, // 8
         {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E}, // 9
     };
-
-    void decoder_task_func(void*) {
-        bool active = false;
-        TickType_t anim_start_tick = 0;
-        uint8_t* frame_buffer = nullptr;
-        int last_timestamp = 0;
-
-        while (true) {
-            // Wait for notification when not actively displaying
-            if (!active) {
-                uint32_t notification_value = 0;
-                if (xTaskNotifyWait(0, ULONG_MAX, &notification_value, portMAX_DELAY) == pdTRUE) {
-                    if (notification_value == static_cast<uint32_t>(WebPTaskNotification_t::WEBP_START)) {
-                        ESP_LOGI(TAG, "decoder notified to start");
-                        active = true;
-                    }
-                }
-            }
-
-            raii::MutexGuard lock(disp.webp_semaphore, MUTEX_TIMEOUT_TICKS);
-            if (!lock) continue;
-
-            // Check if decoder was destroyed
-            if (disp.decoder == nullptr) {
-                active = false;
-                continue;
-            }
-
-            // Handle animation looping
-            if (!WebPAnimDecoderHasMoreFrames(disp.decoder)) {
-                WebPAnimDecoderReset(disp.decoder);
-                anim_start_tick = 0;
-                last_timestamp = 0;
-            }
-
-            if (anim_start_tick == 0) {
-                anim_start_tick = xTaskGetTickCount();
-                last_timestamp = 0;
-            }
-
-            int timestamp = 0;
-            bool get_next_success = WebPAnimDecoderGetNext(disp.decoder, &frame_buffer, &timestamp);
-
-            // Release lock before potentially long operations
-            lock.release();
-
-            if (!get_next_success) {
-                ESP_LOGE(TAG, "error getting next frame, restarting decoder");
-                disp.destroy_decoder();
-
-                if (disp.start_decoder() != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to restart decoder, stopping");
-                    active = false;
-                }
-                continue;
-            }
-
-            if (frame_buffer == nullptr) {
-                ESP_LOGE(TAG, "frame buffer is null");
-                active = false;
-                continue;
-            }
-
-#if DISPLAY_ENABLED
-            // Render frame to display
-            int px = 0;
-            for (int y = 0; y < CONFIG_MATRIX_HEIGHT; y++) {
-                for (int x = 0; x < CONFIG_MATRIX_WIDTH; x++) {
-                    disp.dma_display->drawPixelRGB888(x, y,
-                        frame_buffer[px * 4],
-                        frame_buffer[px * 4 + 1],
-                        frame_buffer[px * 4 + 2]);
-                    px++;
-                }
-            }
-
-            // Draw status bar overlay if enabled
-            if (disp.status_bar.enabled) {
-                disp.dma_display->drawFastHLine(0, 0, CONFIG_MATRIX_WIDTH,
-                    disp.status_bar.r, disp.status_bar.g, disp.status_bar.b);
-            }
-#endif
-
-            // Calculate and apply frame delay
-            int delay = timestamp - last_timestamp;
-            last_timestamp = timestamp;
-
-            // Prevent task starvation for single-frame sprites
-            if (disp.anim_info.frame_count == 1 && delay <= 0) {
-                delay = SINGLE_FRAME_DELAY_MS;
-            }
-
-            if (delay > 0) {
-                xTaskDelayUntil(&anim_start_tick, pdMS_TO_TICKS(delay));
-            }
-        }
-    }
 
     void draw_char_scaled(uint8_t* buffer, int buf_width, int buf_height, char c,
         int x, int y, int scale, uint8_t r, uint8_t g, uint8_t b) {
@@ -250,10 +84,15 @@ namespace {
             return;
         }
 
-        int w = 0, h = 0;
-        get_display_dimensions(&w, &h);
+        // Stop the WebP player before displaying raw buffer
+        webp_player_stop();
 
-        size_t buffer_size = get_display_buffer_size();
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        int w = 0, h = 0;
+        display_get_dimensions(&w, &h);
+
+        size_t buffer_size = display_get_buffer_size();
         auto display_buffer = static_cast<uint8_t*>(
             heap_caps_calloc(buffer_size, sizeof(uint8_t), MALLOC_CAP_SPIRAM));
         if (display_buffer == nullptr) {
@@ -279,13 +118,13 @@ namespace {
             draw_char_scaled(display_buffer, w, h, pop_token[i], x, y_start, scale, 255, 255, 255);
         }
 
-        display_raw_buffer(display_buffer, buffer_size);
+        display_render_rgb_buffer(display_buffer, buffer_size);
         free(display_buffer);
 
         ESP_LOGI(TAG, "Displaying POP code: %s", pop_token);
     }
 
-    // Consolidated event handlers for provisioning and WiFi display states
+    // Event handlers for provisioning display states
     void ble_event_handler(void*, esp_event_base_t, int32_t event_id, void*) {
         if (event_id == PROTOCOMM_TRANSPORT_BLE_CONNECTED) {
             display_pop_code();
@@ -293,20 +132,20 @@ namespace {
         else if (event_id == PROTOCOMM_TRANSPORT_BLE_DISCONNECTED) {
             if (!kd_common_is_wifi_connected()) {
                 ESP_LOGI(TAG, "BLE disconnected during provisioning, showing setup sprite");
-                show_fs_sprite("setup");
+                webp_player_play_embedded("setup", true);
             }
         }
     }
 
     void prov_event_handler(void*, esp_event_base_t, int32_t event_id, void*) {
         if (event_id == WIFI_PROV_START) {
-            show_fs_sprite("setup");
+            webp_player_play_embedded("setup", true);
         }
         else if (event_id == WIFI_PROV_END) {
             wifi_config_t wifi_cfg;
             if (esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg) == ESP_OK &&
                 std::strlen(reinterpret_cast<const char*>(wifi_cfg.sta.ssid)) != 0) {
-                show_fs_sprite("connecting");
+                webp_player_play_embedded("connecting", true);
             }
         }
     }
@@ -316,14 +155,16 @@ namespace {
             wifi_config_t wifi_cfg;
             if (esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg) == ESP_OK &&
                 std::strlen(reinterpret_cast<const char*>(wifi_cfg.sta.ssid)) != 0) {
-                show_fs_sprite("connecting");
+                webp_player_play_embedded("connecting", true);
             }
         }
     }
 
 }  // namespace
 
-//MARK: Public API
+//------------------------------------------------------------------------------
+// Public API
+//------------------------------------------------------------------------------
 
 void display_init() {
     HUB75_I2S_CFG::i2s_pins pins = {
@@ -352,18 +193,6 @@ void display_init() {
     disp.dma_display->fillScreenRGB888(0, 0, 0);
 #endif
 
-    if (!disp.init_semaphore()) {
-        ESP_LOGE(TAG, "Failed to create display semaphore");
-        return;
-    }
-
-    BaseType_t task_ret = xTaskCreatePinnedToCore(decoder_task_func, "decoder",
-        DECODER_TASK_STACK_SIZE, nullptr, DECODER_TASK_PRIORITY, &disp.decoder_task, DECODER_TASK_CORE);
-    if (task_ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create decoder task");
-        return;
-    }
-
     // Register event handlers for provisioning display states
     esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, ESP_EVENT_ANY_ID,
         ble_event_handler, nullptr);
@@ -372,52 +201,39 @@ void display_init() {
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START,
         wifi_event_handler, nullptr);
 
-    show_fs_sprite("boot");
-    vTaskDelay(pdMS_TO_TICKS(BOOT_SPRITE_DELAY_MS));
+    ESP_LOGI(TAG, "Display initialized");
 }
 
-esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len) {
-    if (p_sprite_buf == nullptr || sprite_buf_len == 0) {
-        ESP_LOGE(TAG, "invalid sprite buffer");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // Skip if already displaying this sprite
-    if (p_sprite_buf == disp.webp_data.bytes && sprite_buf_len == disp.webp_data.size) {
-        return ESP_OK;
-    }
-
-    disp.destroy_decoder();
-
-    disp.webp_data.bytes = p_sprite_buf;
-    disp.webp_data.size = sprite_buf_len;
-
-    // Start decoder with limited retries
-    esp_err_t err = ESP_FAIL;
-    for (int retry = 0; retry < DECODER_RETRY_COUNT; retry++) {
-        err = disp.start_decoder();
-        if (err == ESP_OK) break;
-
-        ESP_LOGW(TAG, "Failed to start decoder, retry %d/%d", retry + 1, DECODER_RETRY_COUNT);
-        vTaskDelay(pdMS_TO_TICKS(DECODER_RETRY_DELAY_MS));
-    }
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start decoder after %d retries", DECODER_RETRY_COUNT);
-    }
-    return err;
-}
-
-void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
-    disp.destroy_decoder();
-
-    disp.webp_data.bytes = nullptr;
-    disp.webp_data.size = 0;
-
+void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height) {
 #if DISPLAY_ENABLED
+    if (!disp.dma_display || !rgba_frame) return;
+
+    int px = 0;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            disp.dma_display->drawPixelRGB888(x, y,
+                rgba_frame[px * 4],
+                rgba_frame[px * 4 + 1],
+                rgba_frame[px * 4 + 2]);
+            px++;
+        }
+    }
+
+    // Draw status bar overlay if enabled
+    if (disp.status_bar.enabled) {
+        disp.dma_display->drawFastHLine(0, 0, width,
+            disp.status_bar.r, disp.status_bar.g, disp.status_bar.b);
+    }
+#endif
+}
+
+void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
+#if DISPLAY_ENABLED
+    if (!disp.dma_display) return;
+
     disp.dma_display->fillScreen(0);
 
-    if (raw_buf_len != CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3) {
+    if (buffer_len != CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3) {
         return;
     }
 
@@ -425,8 +241,14 @@ void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
         for (int x = 0; x < CONFIG_MATRIX_WIDTH; x++) {
             int px = (y * CONFIG_MATRIX_WIDTH + x) * 3;
             disp.dma_display->drawPixelRGB888(x, y,
-                p_raw_buf[px], p_raw_buf[px + 1], p_raw_buf[px + 2]);
+                rgb_buffer[px], rgb_buffer[px + 1], rgb_buffer[px + 2]);
         }
+    }
+
+    // Draw status bar overlay if enabled
+    if (disp.status_bar.enabled) {
+        disp.dma_display->drawFastHLine(0, 0, CONFIG_MATRIX_WIDTH,
+            disp.status_bar.r, disp.status_bar.g, disp.status_bar.b);
     }
 #endif
 }
@@ -434,11 +256,10 @@ void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len) {
 void display_clear() {
 #if DISPLAY_ENABLED
     if (disp.dma_display != nullptr) {
-        disp.destroy_decoder();
         disp.dma_display->fillScreenRGB888(0, 0, 0);
     }
 #endif
-    }
+}
 
 void display_set_brightness(uint8_t brightness) {
 #if DISPLAY_ENABLED
@@ -448,7 +269,7 @@ void display_set_brightness(uint8_t brightness) {
 #else
     ESP_LOGW(TAG, "Display is not enabled, cannot set brightness");
 #endif
-    }
+}
 
 void display_clear_status_bar() {
     disp.status_bar.enabled = false;
@@ -461,11 +282,15 @@ void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b) {
     disp.status_bar.b = b;
 }
 
-size_t get_display_buffer_size() {
+DisplayStatusBar_t display_get_status_bar() {
+    return disp.status_bar;
+}
+
+size_t display_get_buffer_size() {
     return CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3;
 }
 
-void get_display_dimensions(int* w, int* h) {
-    *w = CONFIG_MATRIX_WIDTH;
-    *h = CONFIG_MATRIX_HEIGHT;
+void display_get_dimensions(int* width, int* height) {
+    if (width) *width = CONFIG_MATRIX_WIDTH;
+    if (height) *height = CONFIG_MATRIX_HEIGHT;
 }

@@ -1,7 +1,18 @@
+// Display - Pure hardware layer for HUB75 LED matrix
 #ifndef DISPLAY_H
 #define DISPLAY_H
 
 #include "ESP32-HUB75-MatrixPanel-I2S-DMA.h"
+#include <cstdint>
+#include <cstddef>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+//------------------------------------------------------------------------------
+// Status Bar Configuration
+//------------------------------------------------------------------------------
 
 typedef struct DisplayStatusBar_t {
     bool enabled = false;
@@ -10,18 +21,87 @@ typedef struct DisplayStatusBar_t {
     uint8_t b = 0;
 } DisplayStatusBar_t;
 
-typedef enum WebPTaskNotification_t {
-    WEBP_START = 1,
-} WebPTaskNotification_t;
+//------------------------------------------------------------------------------
+// Lifecycle
+//------------------------------------------------------------------------------
 
+/**
+ * Initialize the HUB75 DMA display.
+ * Configures pins, starts DMA, clears to black.
+ */
 void display_init();
-esp_err_t display_sprite(uint8_t* p_sprite_buf, size_t sprite_buf_len);
-void display_raw_buffer(uint8_t* p_raw_buf, size_t raw_buf_len);
+
+//------------------------------------------------------------------------------
+// Rendering Functions
+//------------------------------------------------------------------------------
+
+/**
+ * Render a decoded RGBA frame to the display.
+ * Frame buffer must be RGBA8888 format (4 bytes per pixel).
+ * Applies status bar overlay if enabled.
+ *
+ * @param rgba_frame Pointer to RGBA8888 frame buffer
+ * @param width      Frame width in pixels
+ * @param height     Frame height in pixels
+ */
+void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height);
+
+/**
+ * Render a raw RGB888 buffer to the display.
+ * Buffer must be exactly (CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3) bytes.
+ *
+ * @param rgb_buffer Pointer to RGB888 buffer
+ * @param buffer_len Buffer length in bytes
+ */
+void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len);
+
+/**
+ * Clear the display to black.
+ */
 void display_clear();
-size_t get_display_buffer_size();
-void get_display_dimensions(int* w, int* h);
-void display_clear_status_bar();
-void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b);
+
+//------------------------------------------------------------------------------
+// Configuration
+//------------------------------------------------------------------------------
+
+/**
+ * Set display brightness.
+ * @param brightness 0-255
+ */
 void display_set_brightness(uint8_t brightness);
 
+/**
+ * Enable status bar overlay with specified color.
+ * Draws a 1-pixel line at top of display.
+ */
+void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b);
+
+/**
+ * Disable status bar overlay.
+ */
+void display_clear_status_bar();
+
+/**
+ * Get current status bar configuration.
+ */
+DisplayStatusBar_t display_get_status_bar();
+
+//------------------------------------------------------------------------------
+// Utility
+//------------------------------------------------------------------------------
+
+/**
+ * Get display dimensions.
+ */
+void display_get_dimensions(int* width, int* height);
+
+/**
+ * Get required buffer size for raw RGB888 rendering.
+ */
+size_t display_get_buffer_size();
+
+#ifdef __cplusplus
+}
 #endif
+
+#endif  // DISPLAY_H

@@ -1,46 +1,36 @@
 #include "sockets.h"
+#include "handlers.h"
+#include "messages.h"
 
 #include <esp_log.h>
 #include <esp_websocket_client.h>
 #include <esp_event.h>
-#include <esp_crt_bundle.h>
 #include <esp_wifi.h>
-#include <esp_timer.h>
-#include <esp_partition.h>
-#include <esp_app_desc.h>
+#include <esp_heap_caps.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
-#include <freertos/semphr.h>
 
 #include <kd_common.h>
-#include "../components/kd_common/src/crypto.h"
-#include "display.h"
-
-#include <mbedtls/x509_crt.h>
-#include <time.h>
-#include "scheduler.h"
-#include "sprites.h"
-#include "config.h"
-
 #include <kd/v1/matrx.pb-c.h>
 
-#include <cstring>
+#include "apps.h"
+#include "scheduler.h"
 
 static const char* TAG = "sockets";
 
 namespace {
 
     //------------------------------------------------------------------------------
-    // Certificate Renewal Configuration
+    // Configuration
     //------------------------------------------------------------------------------
 
-    // Check cert expiry every 24 hours (in milliseconds)
-    constexpr int64_t CERT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    constexpr size_t QUEUE_SIZE = 4;
+    constexpr size_t MAX_MSG_SIZE = 100 * 1024;  // 100KB
 
-    // Renew certificate when less than 1 year remaining (in seconds)
-    constexpr int64_t CERT_RENEWAL_THRESHOLD_SEC = 365 * 24 * 60 * 60;
+    constexpr uint32_t TASK_STACK = 4096;
+    constexpr UBaseType_t TASK_PRIORITY = 5;
 
     //------------------------------------------------------------------------------
     // SPIRAM Allocator for Protobuf
@@ -51,7 +41,7 @@ namespace {
     }
 
     void spiram_free(void*, void* ptr) {
-        free(ptr);
+        heap_caps_free(ptr);
     }
 
     ProtobufCAllocator spiram_allocator = {
@@ -60,736 +50,141 @@ namespace {
         .allocator_data = nullptr,
     };
 
-    // Queue configuration
-    constexpr size_t OUTBOX_QUEUE_SIZE = 16;
-    constexpr size_t INBOX_QUEUE_SIZE = 8;
-    constexpr size_t MAX_MESSAGE_SIZE = 150 * 1024;  // 150KB max for large sprite data
+    //------------------------------------------------------------------------------
+    // State
+    //------------------------------------------------------------------------------
 
-    // Task configuration
-    constexpr uint32_t SOCKETS_TASK_STACK_SIZE = 4096;
-    constexpr UBaseType_t SOCKETS_TASK_PRIORITY = 5;
-    constexpr BaseType_t SOCKETS_TASK_CORE = 1;
-
-    // Timing constants
-    constexpr int SEND_TIMEOUT_MS = 10000;
-    constexpr int RECONNECT_TIMEOUT_MS = 5000;
-    constexpr int PING_INTERVAL_SEC = 30;
-    constexpr int64_t CLAIM_RETRY_INTERVAL_MS = 5000;
-    constexpr TickType_t QUEUE_SEND_TIMEOUT_TICKS = pdMS_TO_TICKS(100);
-    constexpr TickType_t MAIN_LOOP_DELAY_MS = 50;
-    constexpr TickType_t PERIODIC_CHECK_INTERVAL_MS = 5000;
-    constexpr TickType_t STATE_POLL_DELAY_MS = 500;
-    constexpr int NETWORK_TIMEOUT_MS = 10000;
-
-    // Buffer sizes
-    constexpr size_t CLAIM_TOKEN_MAX_LEN = 2048;
-    constexpr size_t CERT_BUFFER_SIZE = 12288;  // 12KB for fullchain
-    constexpr size_t CSR_BUFFER_SIZE = 4096;
-    constexpr size_t WEBSOCKET_BUFFER_SIZE = 4096;
-
-    // Connection state
-    enum class ConnectionState : uint8_t {
+    enum class State : uint8_t {
         WaitingForNetwork,
         WaitingForCrypto,
         WaitingForOTA,
-        Connecting,
-        Connected,
-        Disconnected,
+        Ready,
     };
 
-    // Queued message (for both inbound and outbound)
     struct QueuedMessage {
         uint8_t* data;
         size_t len;
     };
 
-    // Receive buffer for handling fragmented messages
-    struct ReceiveBuffer {
-        uint8_t* data = nullptr;
-        size_t capacity = 0;
-        size_t received = 0;
-        size_t expected = 0;
-
-        void reset() {
-            if (data != nullptr) {
-                free(data);
-                data = nullptr;
-            }
-            capacity = 0;
-            received = 0;
-            expected = 0;
-        }
-
-        bool allocate(size_t size) {
-            reset();
-            if (size > MAX_MESSAGE_SIZE) {
-                ESP_LOGE(TAG, "Message too large: %zu > %zu", size, MAX_MESSAGE_SIZE);
-                return false;
-            }
-            data = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM));
-            if (data == nullptr) {
-                ESP_LOGE(TAG, "Failed to allocate receive buffer: %zu bytes", size);
-                return false;
-            }
-            capacity = size;
-            expected = size;
-            received = 0;
-            return true;
-        }
-
-        bool append(const uint8_t* src, size_t len) {
-            if (data == nullptr || received + len > capacity) {
-                ESP_LOGE(TAG, "Buffer overflow: received=%zu + len=%zu > capacity=%zu",
-                    received, len, capacity);
-                return false;
-            }
-            std::memcpy(data + received, src, len);
-            received += len;
-            return true;
-        }
-
-        bool is_complete() const {
-            return data != nullptr && received >= expected && expected > 0;
-        }
-
-        // Transfer ownership of buffer to caller
-        uint8_t* release() {
-            uint8_t* ptr = data;
-            data = nullptr;
-            capacity = 0;
-            received = 0;
-            expected = 0;
-            return ptr;
-        }
-    };
-
-    // Socket state
-    struct SocketState {
-        // FreeRTOS handles
+    struct {
         TaskHandle_t task = nullptr;
-        QueueHandle_t outbox = nullptr;  // Messages to send
-        QueueHandle_t inbox = nullptr;   // Messages received
-        SemaphoreHandle_t mutex = nullptr;
-
-        // WebSocket client
+        QueueHandle_t outbox = nullptr;
+        QueueHandle_t inbox = nullptr;
         esp_websocket_client_handle_t client = nullptr;
-        ConnectionState state = ConnectionState::WaitingForNetwork;
+        State state = State::WaitingForNetwork;
 
-        // Receive buffer (protected by event handler context)
-        ReceiveBuffer rx_buf;
-
-        // Device claim state
-        bool needs_claimed = false;
-        int64_t last_claim_attempt_ms = 0;
-
-        // Certificate renewal state
-        int64_t last_cert_check_ms = 0;
-        bool renewal_in_progress = false;
-
-        // Certificate (cached)
-        char* cert = nullptr;
-        size_t cert_len = 0;
-        esp_ds_data_ctx_t* ds_ctx = nullptr;
+        // Receive buffer
+        uint8_t* rx_buf = nullptr;
+        size_t rx_len = 0;
+        size_t rx_expected = 0;
 
         bool is_connected() const {
-            return state == ConnectionState::Connected &&
-                client != nullptr &&
-                esp_websocket_client_is_connected(client);
+            return client != nullptr && esp_websocket_client_is_connected(client);
         }
 
-        void cleanup_cert() {
-            if (cert != nullptr) {
-                free(cert);
-                cert = nullptr;
-                cert_len = 0;
-                ds_ctx = nullptr;
-            }
+        void rx_reset() {
+            if (rx_buf) { heap_caps_free(rx_buf); rx_buf = nullptr; }
+            rx_len = rx_expected = 0;
         }
-    };
-
-    SocketState sock;
-
-    // Forward declarations
-    void process_inbox_message(const uint8_t* data, size_t len);
-    void attempt_device_claim();
-    void upload_coredump_if_present();
-    void check_certificate_renewal();
+    } sock;
 
     //------------------------------------------------------------------------------
-    // Certificate Expiry Checking
+    // WebSocket Events
     //------------------------------------------------------------------------------
 
-    // Returns seconds until cert expires, or -1 on error
-    int64_t get_cert_seconds_until_expiry() {
-        if (sock.cert == nullptr || sock.cert_len == 0) {
-            return -1;
-        }
-
-        mbedtls_x509_crt crt;
-        mbedtls_x509_crt_init(&crt);
-
-        int ret = mbedtls_x509_crt_parse(&crt,
-            reinterpret_cast<const unsigned char*>(sock.cert),
-            sock.cert_len + 1);  // +1 for null terminator
-
-        if (ret != 0) {
-            ESP_LOGE(TAG, "Failed to parse certificate: -0x%04X", -ret);
-            mbedtls_x509_crt_free(&crt);
-            return -1;
-        }
-
-        // Get current time
-        time_t now;
-        time(&now);
-
-        // Convert mbedtls time to time_t
-        struct tm expiry_tm = {};
-        expiry_tm.tm_year = crt.valid_to.year - 1900;
-        expiry_tm.tm_mon = crt.valid_to.mon - 1;
-        expiry_tm.tm_mday = crt.valid_to.day;
-        expiry_tm.tm_hour = crt.valid_to.hour;
-        expiry_tm.tm_min = crt.valid_to.min;
-        expiry_tm.tm_sec = crt.valid_to.sec;
-
-        time_t expiry = mktime(&expiry_tm);
-
-        mbedtls_x509_crt_free(&crt);
-
-        if (expiry == (time_t)-1) {
-            ESP_LOGE(TAG, "Failed to convert expiry time");
-            return -1;
-        }
-
-        int64_t seconds_remaining = static_cast<int64_t>(difftime(expiry, now));
-        return seconds_remaining;
-    }
-
-    void check_certificate_renewal() {
-        if (!sock.is_connected()) return;
-        if (sock.renewal_in_progress) return;
-
-        // Check if we have a valid system time (after 2024)
-        time_t now;
-        time(&now);
-        struct tm* tm_now = localtime(&now);
-        if (tm_now == nullptr || tm_now->tm_year < 124) {  // 124 = 2024 - 1900
-            ESP_LOGD(TAG, "System time not set, skipping cert expiry check");
-            return;
-        }
-
-        int64_t now_ms = esp_timer_get_time() / 1000;
-
-        // Only check periodically
-        if (sock.last_cert_check_ms > 0 &&
-            (now_ms - sock.last_cert_check_ms) < CERT_CHECK_INTERVAL_MS) {
-            return;
-        }
-        sock.last_cert_check_ms = now_ms;
-
-        int64_t seconds_remaining = get_cert_seconds_until_expiry();
-        if (seconds_remaining < 0) {
-            ESP_LOGW(TAG, "Could not determine certificate expiry");
-            return;
-        }
-
-        int64_t days_remaining = seconds_remaining / (24 * 60 * 60);
-        ESP_LOGI(TAG, "Certificate expires in %lld days", days_remaining);
-
-        if (seconds_remaining <= CERT_RENEWAL_THRESHOLD_SEC) {
-            ESP_LOGI(TAG, "Certificate expiring soon, requesting renewal");
-            sock.renewal_in_progress = true;
-            sockets_request_cert_renewal();
-        }
-    }
-
-    //------------------------------------------------------------------------------
-    // Message Handlers
-    //------------------------------------------------------------------------------
-
-    void handle_schedule_response(Kd__V1__MatrxSchedule* response) {
-        if (response == nullptr || response->n_schedule_items == 0) {
-            ESP_LOGI(TAG, "Received empty schedule");
-            scheduler_clear();
-            show_fs_sprite("ready");
-            return;
-        }
-
-        ESP_LOGI(TAG, "Received schedule with %zu items", response->n_schedule_items);
-        scheduler_set_schedule(response);
-        scheduler_start();
-    }
-
-    void handle_render_response(Kd__V1__MatrxSpriteData* response) {
-        if (response == nullptr ||
-            response->sprite_uuid.data == nullptr ||
-            response->sprite_uuid.len != UUID_SIZE_BYTES) {
-            ESP_LOGW(TAG, "Invalid render response");
-            return;
-        }
-
-        scheduler_handle_render_response(
-            response->sprite_uuid.data,
-            response->sprite_data.data,
-            response->sprite_data.len,
-            response->render_error
-        );
-    }
-
-    void handle_device_config_request() {
-        system_config_t cfg = config_get_system_config();
-
-        Kd__V1__DeviceConfig device_config = KD__V1__DEVICE_CONFIG__INIT;
-        device_config.screen_enabled = cfg.screen_enabled;
-        device_config.screen_brightness = cfg.screen_brightness;
-        device_config.auto_brightness_enabled = cfg.auto_brightness_enabled;
-        device_config.screen_off_lux = cfg.screen_off_lux;
-
-        Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
-        message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_DEVICE_CONFIG;
-        message.device_config = &device_config;
-
-        // Pack and queue
-        size_t len = kd__v1__matrx_message__get_packed_size(&message);
-        auto* buf = static_cast<uint8_t*>(heap_caps_malloc(len, MALLOC_CAP_SPIRAM));
-        if (buf != nullptr) {
-            kd__v1__matrx_message__pack(&message, buf);
-            QueuedMessage msg = { buf, len };
-            if (xQueueSend(sock.outbox, &msg, 0) != pdTRUE) {
-                free(buf);
-            }
-        }
-    }
-
-    void handle_device_config(const Kd__V1__DeviceConfig* device_config) {
-        if (device_config == nullptr) return;
-
-        system_config_t new_cfg = config_get_system_config();
-        new_cfg.screen_enabled = device_config->screen_enabled;
-        if (device_config->screen_brightness <= 255) {
-            new_cfg.screen_brightness = static_cast<uint8_t>(device_config->screen_brightness);
-        }
-        new_cfg.auto_brightness_enabled = device_config->auto_brightness_enabled;
-        if (device_config->screen_off_lux <= 65535) {
-            new_cfg.screen_off_lux = static_cast<uint16_t>(device_config->screen_off_lux);
-        }
-
-        config_update_system_config(&new_cfg, true, true, true, true);
-        ESP_LOGI(TAG, "Applied device config from server");
-    }
-
-    void handle_join_response(Kd__V1__JoinResponse* response) {
-        if (response == nullptr) return;
-
-        ESP_LOGI(TAG, "Join response: claimed=%d, needs_claimed=%d",
-            response->is_claimed, response->needs_claimed);
-
-        sockets_send_device_info();
-
-        // Upload coredump now that connection is fully established
-        upload_coredump_if_present();
-
-        sock.needs_claimed = response->needs_claimed || !response->is_claimed;
-
-        if (!sock.needs_claimed) {
-            kd_common_clear_claim_token();
-        }
-        else {
-            attempt_device_claim();
-        }
-    }
-
-    void handle_cert_response(Kd__V1__CertResponse* response) {
-        sock.renewal_in_progress = false;
-
-        if (response == nullptr) return;
-
-        if (!response->success) {
-            ESP_LOGE(TAG, "Cert renewal failed: %s",
-                response->error ? response->error : "unknown error");
-            return;
-        }
-
-        if (response->device_cert.data == nullptr || response->device_cert.len == 0) {
-            ESP_LOGE(TAG, "Cert renewal response missing certificate");
-            return;
-        }
-
-        ESP_LOGI(TAG, "Received new certificate (%zu bytes)", response->device_cert.len);
-
-        // Store the new certificate
-        esp_err_t err = crypto_set_device_cert(
-            reinterpret_cast<char*>(response->device_cert.data),
-            response->device_cert.len);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to store new certificate: %s", esp_err_to_name(err));
-            return;
-        }
-
-        ESP_LOGI(TAG, "Certificate stored successfully, resetting connection");
-
-        // Clear cached certificate so it's reloaded on next connect
-        sock.cleanup_cert();
-
-        // Reset cert check timer so we check again after reconnect
-        sock.last_cert_check_ms = 0;
-
-        // Stop and destroy current WebSocket client
-        if (sock.client != nullptr) {
-            esp_websocket_client_stop(sock.client);
-            esp_websocket_client_destroy(sock.client);
-            sock.client = nullptr;
-        }
-
-        // Reset receive buffer
-        sock.rx_buf.reset();
-
-        // Trigger reconnection with new certificate
-        sock.state = ConnectionState::Connecting;
-    }
-
-    void process_inbox_message(const uint8_t* data, size_t len) {
-        auto* message = kd__v1__matrx_message__unpack(&spiram_allocator, len, data);
-        if (message == nullptr) {
-            ESP_LOGE(TAG, "Failed to unpack message (%zu bytes)", len);
-            return;
-        }
-
-        switch (message->message_case) {
-        case KD__V1__MATRX_MESSAGE__MESSAGE_SCHEDULE:
-            handle_schedule_response(message->schedule);
-            break;
-        case KD__V1__MATRX_MESSAGE__MESSAGE_SPRITE_DATA:
-            handle_render_response(message->sprite_data);
-            break;
-        case KD__V1__MATRX_MESSAGE__MESSAGE_DEVICE_CONFIG_REQUEST:
-            handle_device_config_request();
-            break;
-        case KD__V1__MATRX_MESSAGE__MESSAGE_DEVICE_CONFIG:
-            handle_device_config(message->device_config);
-            break;
-        case KD__V1__MATRX_MESSAGE__MESSAGE_JOIN_RESPONSE:
-            handle_join_response(message->join_response);
-            break;
-        case KD__V1__MATRX_MESSAGE__MESSAGE_FACTORY_RESET_REQUEST:
-            {
-                const char* reason = nullptr;
-                if (message->factory_reset_request != nullptr &&
-                    message->factory_reset_request->reason != nullptr) {
-                    reason = message->factory_reset_request->reason;
-                }
-                ESP_LOGI(TAG, "Received factory reset request from server");
-                kd__v1__matrx_message__free_unpacked(message, &spiram_allocator);
-                perform_factory_reset(reason);  // Does not return
-            }
-            break;
-        case KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RESPONSE:
-            handle_cert_response(message->cert_response);
-            break;
-        default:
-            ESP_LOGD(TAG, "Unhandled message type: %d", message->message_case);
-            break;
-        }
-
-        kd__v1__matrx_message__free_unpacked(message, &spiram_allocator);
-    }
-
-    //------------------------------------------------------------------------------
-    // Outbound Message Helpers
-    //------------------------------------------------------------------------------
-
-    bool queue_outbound_message(const Kd__V1__MatrxMessage* message) {
-        if (message == nullptr) return false;
-
-        size_t len = kd__v1__matrx_message__get_packed_size(message);
-        auto* buf = static_cast<uint8_t*>(heap_caps_malloc(len, MALLOC_CAP_SPIRAM));
-        if (buf == nullptr) {
-            ESP_LOGE(TAG, "Failed to allocate outbound message buffer");
-            return false;
-        }
-
-        kd__v1__matrx_message__pack(message, buf);
-
-        QueuedMessage msg = { buf, len };
-        if (xQueueSend(sock.outbox, &msg, QUEUE_SEND_TIMEOUT_TICKS) != pdTRUE) {
-            ESP_LOGW(TAG, "Outbox full, dropping message");
-            free(buf);
-            return false;
-        }
-
-        return true;
-    }
-
-    void attempt_device_claim() {
-        if (!sock.needs_claimed || !sock.is_connected()) return;
-
-        int64_t now_ms = esp_timer_get_time() / 1000;
-        if (sock.last_claim_attempt_ms > 0 &&
-            (now_ms - sock.last_claim_attempt_ms) < CLAIM_RETRY_INTERVAL_MS) {
-            return;
-        }
-
-        auto* token = static_cast<uint8_t*>(heap_caps_malloc(CLAIM_TOKEN_MAX_LEN, MALLOC_CAP_SPIRAM));
-        if (token == nullptr) {
-            ESP_LOGE(TAG, "Failed to allocate claim token buffer");
-            return;
-        }
-
-        size_t token_len = CLAIM_TOKEN_MAX_LEN;
-        esp_err_t err = kd_common_get_claim_token(reinterpret_cast<char*>(token), &token_len);
-        if (err != ESP_OK || token_len == 0) {
-            free(token);
-            return;
-        }
-
-        Kd__V1__ClaimDevice claim = KD__V1__CLAIM_DEVICE__INIT;
-        claim.claim_token.data = token;
-        claim.claim_token.len = token_len;
-
-        Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
-        message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_CLAIM_DEVICE;
-        message.claim_device = &claim;
-
-        queue_outbound_message(&message);
-        sock.last_claim_attempt_ms = now_ms;
-
-        free(token);
-        ESP_LOGI(TAG, "Sent device claim request");
-    }
-
-    //------------------------------------------------------------------------------
-    // WebSocket Event Handler
-    //------------------------------------------------------------------------------
-
-    void websocket_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
+    void ws_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
         auto* data = static_cast<esp_websocket_event_data_t*>(event_data);
 
         switch (event_id) {
         case WEBSOCKET_EVENT_CONNECTED:
-            ESP_LOGI(TAG, "WebSocket connected");
-            sock.state = ConnectionState::Connected;
+            ESP_LOGI(TAG, "Connected");
             show_fs_sprite("ready");
-
-            // Request schedule immediately - server will respond with JoinResponse first
-            request_schedule();
+            msg_send_device_info();
+            msg_send_schedule_request();
             break;
 
         case WEBSOCKET_EVENT_DISCONNECTED:
-            ESP_LOGW(TAG, "WebSocket disconnected (transport)");
-            sock.state = ConnectionState::Disconnected;
-            sock.rx_buf.reset();
-            // Drain inbox to clear any partial/corrupt messages
-            {
-                QueuedMessage msg;
-                while (xQueueReceive(sock.inbox, &msg, 0) == pdTRUE) {
-                    if (msg.data != nullptr) free(msg.data);
-                }
-            }
-            show_fs_sprite("connecting");
-            break;
-
         case WEBSOCKET_EVENT_CLOSED:
-            ESP_LOGI(TAG, "WebSocket closed (clean)");
-            sock.state = ConnectionState::Connecting;  // Trigger reconnection
-            sock.rx_buf.reset();
-            show_fs_sprite("connecting");
-            break;
-
         case WEBSOCKET_EVENT_ERROR:
-            ESP_LOGE(TAG, "WebSocket error");
-            sock.state = ConnectionState::Connecting;  // Trigger reconnection
-            sock.rx_buf.reset();
-            show_fs_sprite("connecting");
+            ESP_LOGW(TAG, "Disconnected/error (event=%ld)", event_id);
+            sock.rx_reset();
+            scheduler_on_disconnect();
             break;
 
         case WEBSOCKET_EVENT_DATA:
-            // Handle incoming data (may be fragmented)
-            // Ignore control frames and empty messages
-            if (data->op_code == 0x08 || data->op_code == 0x09 || data->op_code == 0x0A) {
-                break;
-            }
-            if (data->payload_len == 0 || data->data_len == 0 || data->data_ptr == nullptr) {
-                break;
-            }
+            // Skip control frames
+            if (data->op_code >= 0x08) break;
+            if (data->payload_len == 0 || data->data_ptr == nullptr) break;
 
-            // First fragment of a new message
+            // New message
             if (data->payload_offset == 0) {
-                // Reset any stale buffer before allocating new one
-                sock.rx_buf.reset();
-                if (!sock.rx_buf.allocate(data->payload_len)) {
-                    ESP_LOGE(TAG, "Failed to allocate buffer for %d byte message", data->payload_len);
+                sock.rx_reset();
+                if (data->payload_len > MAX_MSG_SIZE) {
+                    ESP_LOGE(TAG, "Message too large: %d", data->payload_len);
                     break;
                 }
-            }
-
-            // Ensure we have a valid buffer before appending
-            if (sock.rx_buf.data == nullptr) {
-                ESP_LOGW(TAG, "Received data fragment without buffer (offset=%d)", data->payload_offset);
-                break;
-            }
-
-            // Append data to buffer
-            if (!sock.rx_buf.append(reinterpret_cast<const uint8_t*>(data->data_ptr), data->data_len)) {
-                ESP_LOGE(TAG, "Failed to append data to receive buffer");
-                sock.rx_buf.reset();
-                break;
-            }
-
-            // Check if message is complete
-            if (sock.rx_buf.is_complete()) {
-                size_t msg_len = sock.rx_buf.received;
-                uint8_t* msg_data = sock.rx_buf.release();
-                QueuedMessage msg = { msg_data, msg_len };
-
-                if (xQueueSend(sock.inbox, &msg, 0) != pdTRUE) {
-                    ESP_LOGE(TAG, "Inbox full, dropping message");
-                    free(msg_data);
+                sock.rx_buf = static_cast<uint8_t*>(
+                    heap_caps_calloc(data->payload_len, 1, MALLOC_CAP_SPIRAM));
+                if (!sock.rx_buf) {
+                    ESP_LOGE(TAG, "Alloc failed: %d bytes", data->payload_len);
+                    break;
                 }
+                sock.rx_expected = data->payload_len;
+                ESP_LOGI(TAG, "RX: %d bytes", data->payload_len);
+            }
+
+            // Append chunk
+            if (sock.rx_buf && sock.rx_len + data->data_len <= sock.rx_expected) {
+                memcpy(sock.rx_buf + sock.rx_len, data->data_ptr, data->data_len);
+                sock.rx_len += data->data_len;
+            }
+
+            // Complete?
+            if (sock.rx_buf && sock.rx_len >= sock.rx_expected) {
+                QueuedMessage msg = { sock.rx_buf, sock.rx_len };
+                if (xQueueSend(sock.inbox, &msg, 0) != pdTRUE) {
+                    heap_caps_free(sock.rx_buf);
+                }
+                sock.rx_buf = nullptr;
+                sock.rx_len = sock.rx_expected = 0;
             }
             break;
 
         default:
-            ESP_LOGD(TAG, "WebSocket event: %ld", event_id);
             break;
         }
     }
 
-    //------------------------------------------------------------------------------
-    // WiFi Event Handler
-    //------------------------------------------------------------------------------
-
-    void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event_id, void*) {
-        if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-            ESP_LOGI(TAG, "WiFi disconnected");
-            sock.state = ConnectionState::WaitingForNetwork;
+    void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void*) {
+        if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+            sock.state = State::WaitingForNetwork;
         }
-        else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-            ESP_LOGI(TAG, "WiFi connected, got IP");
-            if (sock.state == ConnectionState::WaitingForNetwork) {
-                sock.state = ConnectionState::WaitingForCrypto;
+        else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+            if (sock.state == State::WaitingForNetwork) {
+                sock.state = State::WaitingForCrypto;
             }
         }
     }
 
     //------------------------------------------------------------------------------
-    // Client Initialization
+    // WebSocket Client
     //------------------------------------------------------------------------------
 
-    esp_err_t init_websocket_client() {
-        if (sock.client != nullptr) {
+    esp_err_t start_client() {
+        if (sock.client) {
             esp_websocket_client_destroy(sock.client);
             sock.client = nullptr;
         }
 
-        // Load certificate if not cached (supports fullchain with intermediates)
-        if (sock.cert == nullptr) {
-            sock.ds_ctx = kd_common_crypto_get_ctx();
-            sock.cert = static_cast<char*>(heap_caps_calloc(CERT_BUFFER_SIZE, sizeof(char), MALLOC_CAP_SPIRAM));
-            if (sock.cert == nullptr) {
-                ESP_LOGE(TAG, "Failed to allocate certificate buffer");
-                return ESP_ERR_NO_MEM;
-            }
+        esp_websocket_client_config_t cfg = {};
+        cfg.uri = "ws://192.168.0.245:9091";
+        cfg.disable_auto_reconnect = false;
 
-            sock.cert_len = CERT_BUFFER_SIZE;
-            esp_err_t ret = kd_common_get_device_cert(sock.cert, &sock.cert_len);
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to get device certificate: %s", esp_err_to_name(ret));
-                sock.cleanup_cert();
-                return ret;
-            }
-            ESP_LOGI(TAG, "Loaded device certificate (%zu bytes)", sock.cert_len);
-        }
+        sock.client = esp_websocket_client_init(&cfg);
+        if (!sock.client) return ESP_FAIL;
 
-        esp_websocket_client_config_t config = {};
-        // TODO: Switch to production URI with mTLS
-        config.uri = "ws://192.168.0.245";
-        config.port = 9091;
-        // config.client_cert = sock.cert;
-        // config.client_cert_len = sock.cert_len + 1;
-        // config.client_ds_data = sock.ds_ctx;
-        // config.crt_bundle_attach = esp_crt_bundle_attach;
-        config.reconnect_timeout_ms = RECONNECT_TIMEOUT_MS;
-        config.network_timeout_ms = NETWORK_TIMEOUT_MS;
-        config.ping_interval_sec = PING_INTERVAL_SEC;
-        config.disable_auto_reconnect = false;
-        config.buffer_size = WEBSOCKET_BUFFER_SIZE;
-
-        sock.client = esp_websocket_client_init(&config);
-        if (sock.client == nullptr) {
-            ESP_LOGE(TAG, "Failed to init websocket client");
-            return ESP_FAIL;
-        }
-
-        esp_err_t ret = esp_websocket_register_events(sock.client, WEBSOCKET_EVENT_ANY,
-            websocket_event_handler, nullptr);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to register websocket events: %s", esp_err_to_name(ret));
-            esp_websocket_client_destroy(sock.client);
-            sock.client = nullptr;
-            return ret;
-        }
-
-        return ESP_OK;
-    }
-
-    //------------------------------------------------------------------------------
-    // Coredump Upload
-    //------------------------------------------------------------------------------
-
-    void upload_coredump_if_present() {
-        const esp_partition_t* partition = esp_partition_find_first(
-            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, "coredump");
-
-        if (partition == nullptr) return;
-
-        size_t size = partition->size;
-        auto* data = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM));
-        if (data == nullptr) {
-            ESP_LOGE(TAG, "Failed to allocate memory for coredump");
-            return;
-        }
-
-        if (esp_partition_read(partition, 0, data, size) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to read coredump");
-            free(data);
-            return;
-        }
-
-        // Check if partition is erased (all 0xFF)
-        bool is_erased = true;
-        for (size_t i = 0; i < 256 && i < size; i++) {  // Just check first 256 bytes
-            if (data[i] != 0xFF) {
-                is_erased = false;
-                break;
-            }
-        }
-
-        if (!is_erased) {
-            ESP_LOGI(TAG, "Uploading coredump (%zu bytes)", size);
-
-            const esp_app_desc_t* app_desc = esp_app_get_description();
-
-            Kd__V1__UploadCoreDump upload = KD__V1__UPLOAD_CORE_DUMP__INIT;
-            upload.core_dump.data = data;
-            upload.core_dump.len = size;
-            upload.firmware_project = const_cast<char*>(app_desc->project_name);
-            upload.firmware_version = const_cast<char*>(app_desc->version);
-#ifdef FIRMWARE_VARIANT
-            upload.firmware_variant = const_cast<char*>(FIRMWARE_VARIANT);
-#endif
-
-            Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
-            message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
-            message.upload_core_dump = &upload;
-
-            if (queue_outbound_message(&message)) {
-                // Erase after queuing
-                if (esp_partition_erase_range(partition, 0, size) != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to erase coredump partition");
-                }
-            }
-        }
-
-        free(data);
+        esp_websocket_register_events(sock.client, WEBSOCKET_EVENT_ANY, ws_event_handler, nullptr);
+        return esp_websocket_client_start(sock.client);
     }
 
     //------------------------------------------------------------------------------
@@ -797,121 +192,88 @@ namespace {
     //------------------------------------------------------------------------------
 
     void sockets_task(void*) {
-        ESP_LOGI(TAG, "Sockets task started");
+        esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler, nullptr);
+        esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr);
 
-        // Register WiFi event handlers
-        esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED,
-            wifi_event_handler, nullptr);
-        esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-            wifi_event_handler, nullptr);
-
-        // Check if already connected
         if (kd_common_is_wifi_connected()) {
-            sock.state = ConnectionState::WaitingForCrypto;
+            sock.state = State::WaitingForCrypto;
         }
+
+        bool started = false;
 
         while (true) {
             // State machine
             switch (sock.state) {
-            case ConnectionState::WaitingForNetwork:
-                vTaskDelay(pdMS_TO_TICKS(STATE_POLL_DELAY_MS));
+            case State::WaitingForNetwork:
+                vTaskDelay(pdMS_TO_TICKS(500));
                 continue;
 
-            case ConnectionState::WaitingForCrypto:
+            case State::WaitingForCrypto:
                 if (kd_common_crypto_get_state() == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
-                    ESP_LOGI(TAG, "Crypto ready");
 #ifdef ENABLE_OTA
-                    sock.state = ConnectionState::WaitingForOTA;
+                    sock.state = State::WaitingForOTA;
                     show_fs_sprite("check_updates");
 #else
-                    sock.state = ConnectionState::Connecting;
+                    sock.state = State::Ready;
 #endif
                 }
                 else {
-                    vTaskDelay(pdMS_TO_TICKS(STATE_POLL_DELAY_MS));
+                    vTaskDelay(pdMS_TO_TICKS(500));
                 }
                 continue;
 
-            case ConnectionState::WaitingForOTA:
+            case State::WaitingForOTA:
 #ifdef ENABLE_OTA
                 if (kd_common_ota_has_completed_boot_check()) {
-                    ESP_LOGI(TAG, "OTA check complete");
-                    sock.state = ConnectionState::Connecting;
+                    sock.state = State::Ready;
                 }
                 else {
-                    vTaskDelay(pdMS_TO_TICKS(STATE_POLL_DELAY_MS));
+                    vTaskDelay(pdMS_TO_TICKS(500));
                 }
 #else
-                sock.state = ConnectionState::Connecting;
+                sock.state = State::Ready;
 #endif
                 continue;
 
-            case ConnectionState::Connecting:
-                show_fs_sprite("connecting");
-                if (init_websocket_client() == ESP_OK) {
-                    esp_err_t ret = esp_websocket_client_start(sock.client);
-                    if (ret == ESP_OK) {
-                        ESP_LOGI(TAG, "WebSocket client started");
-                        // State will be updated by event handler
-                        sock.state = ConnectionState::Disconnected;  // Waiting for CONNECTED event
+            case State::Ready:
+                if (!started) {
+                    show_fs_sprite("connecting");
+                    if (start_client() == ESP_OK) {
+                        ESP_LOGI(TAG, "Client started");
+                        started = true;
                     }
                     else {
-                        ESP_LOGE(TAG, "Failed to start websocket client: %s", esp_err_to_name(ret));
-                        vTaskDelay(pdMS_TO_TICKS(RECONNECT_TIMEOUT_MS));
+                        vTaskDelay(pdMS_TO_TICKS(5000));
                     }
+                    continue;
                 }
-                else {
-                    vTaskDelay(pdMS_TO_TICKS(RECONNECT_TIMEOUT_MS));
-                }
-                continue;
-
-            case ConnectionState::Connected:
-            case ConnectionState::Disconnected:
-                // Normal operation - process queues
                 break;
             }
 
-            // Process outbound messages
-            QueuedMessage out_msg;
-            while (xQueueReceive(sock.outbox, &out_msg, 0) == pdTRUE) {
-                if (out_msg.data == nullptr) continue;
+            // Send outbound
+            QueuedMessage out;
+            while (xQueueReceive(sock.outbox, &out, 0) == pdTRUE) {
+                if (out.data && sock.is_connected()) {
+                    esp_websocket_client_send_bin(sock.client,
+                        reinterpret_cast<char*>(out.data), out.len, pdMS_TO_TICKS(5000));
+                }
+                if (out.data) heap_caps_free(out.data);
+            }
 
-                if (sock.is_connected()) {
-                    int ret = esp_websocket_client_send_bin(
-                        sock.client,
-                        reinterpret_cast<const char*>(out_msg.data),
-                        out_msg.len,
-                        pdMS_TO_TICKS(SEND_TIMEOUT_MS)
-                    );
-                    if (ret < 0) {
-                        ESP_LOGE(TAG, "Failed to send message (%zu bytes)", out_msg.len);
+            // Process inbound
+            QueuedMessage in;
+            while (xQueueReceive(sock.inbox, &in, 0) == pdTRUE) {
+                if (in.data) {
+                    auto* msg = kd__v1__matrx_message__unpack(&spiram_allocator, in.len, in.data);
+                    if (msg) {
+                        handle_message(msg);
+                        kd__v1__matrx_message__free_unpacked(msg, &spiram_allocator);
                     }
-                }
-                free(out_msg.data);
-            }
-
-            // Process inbound messages
-            QueuedMessage in_msg;
-            while (xQueueReceive(sock.inbox, &in_msg, 0) == pdTRUE) {
-                if (in_msg.data != nullptr) {
-                    process_inbox_message(in_msg.data, in_msg.len);
-                    free(in_msg.data);
+                    heap_caps_free(in.data);
                 }
             }
 
-            // Periodic tasks (when connected)
-            static TickType_t last_periodic = 0;
-            TickType_t now = xTaskGetTickCount();
-            if (now - last_periodic >= pdMS_TO_TICKS(PERIODIC_CHECK_INTERVAL_MS)) {
-                last_periodic = now;
-
-                if (sock.is_connected()) {
-                    attempt_device_claim();
-                    check_certificate_renewal();
-                }
-            }
-
-            vTaskDelay(pdMS_TO_TICKS(MAIN_LOOP_DELAY_MS));
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
 
@@ -922,187 +284,47 @@ namespace {
 //------------------------------------------------------------------------------
 
 void sockets_init() {
-    sock.mutex = xSemaphoreCreateMutex();
-    if (sock.mutex == nullptr) {
-        ESP_LOGE(TAG, "Failed to create mutex");
+    sock.outbox = xQueueCreate(QUEUE_SIZE, sizeof(QueuedMessage));
+    sock.inbox = xQueueCreate(QUEUE_SIZE, sizeof(QueuedMessage));
+
+    if (!sock.outbox || !sock.inbox) {
+        ESP_LOGE(TAG, "Failed to create queues");
         return;
     }
 
-    sock.outbox = xQueueCreate(OUTBOX_QUEUE_SIZE, sizeof(QueuedMessage));
-    if (sock.outbox == nullptr) {
-        ESP_LOGE(TAG, "Failed to create outbox queue");
-        return;
-    }
+    msg_init(sock.outbox);
 
-    sock.inbox = xQueueCreate(INBOX_QUEUE_SIZE, sizeof(QueuedMessage));
-    if (sock.inbox == nullptr) {
-        ESP_LOGE(TAG, "Failed to create inbox queue");
-        return;
-    }
+    xTaskCreatePinnedToCore(sockets_task, "sockets", TASK_STACK, nullptr,
+        TASK_PRIORITY, &sock.task, 1);
 
-    BaseType_t ret = xTaskCreatePinnedToCore(
-        sockets_task, "sockets", SOCKETS_TASK_STACK_SIZE, nullptr,
-        SOCKETS_TASK_PRIORITY, &sock.task, SOCKETS_TASK_CORE);
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create sockets task");
-    }
-
-    ESP_LOGI(TAG, "Sockets initialized");
+    ESP_LOGI(TAG, "Initialized");
 }
 
 void sockets_deinit() {
-    if (sock.client != nullptr) {
+    if (sock.client) {
         esp_websocket_client_stop(sock.client);
         esp_websocket_client_destroy(sock.client);
         sock.client = nullptr;
     }
 
-    sock.cleanup_cert();
-    sock.rx_buf.reset();
-
-    if (sock.task != nullptr) {
+    if (sock.task) {
         vTaskDelete(sock.task);
         sock.task = nullptr;
     }
 
-    // Drain and delete queues
-    QueuedMessage msg;
-    if (sock.outbox != nullptr) {
-        while (xQueueReceive(sock.outbox, &msg, 0) == pdTRUE) {
-            free(msg.data);
-        }
-        vQueueDelete(sock.outbox);
-        sock.outbox = nullptr;
-    }
-    if (sock.inbox != nullptr) {
-        while (xQueueReceive(sock.inbox, &msg, 0) == pdTRUE) {
-            free(msg.data);
-        }
-        vQueueDelete(sock.inbox);
-        sock.inbox = nullptr;
-    }
+    sock.rx_reset();
 
-    if (sock.mutex != nullptr) {
-        vSemaphoreDelete(sock.mutex);
-        sock.mutex = nullptr;
+    QueuedMessage msg;
+    if (sock.outbox) {
+        while (xQueueReceive(sock.outbox, &msg, 0) == pdTRUE) heap_caps_free(msg.data);
+        vQueueDelete(sock.outbox);
+    }
+    if (sock.inbox) {
+        while (xQueueReceive(sock.inbox, &msg, 0) == pdTRUE) heap_caps_free(msg.data);
+        vQueueDelete(sock.inbox);
     }
 }
 
 bool sockets_is_connected() {
     return sock.is_connected();
-}
-
-void request_schedule() {
-    Kd__V1__ScheduleRequest request = KD__V1__SCHEDULE_REQUEST__INIT;
-
-    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
-    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_SCHEDULE_REQUEST;
-    message.schedule_request = &request;
-
-    queue_outbound_message(&message);
-}
-
-void sockets_send_currently_displaying(uint8_t* uuid) {
-    if (uuid == nullptr) return;
-
-    Kd__V1__CurrentlyDisplayingUpdate update = KD__V1__CURRENTLY_DISPLAYING_UPDATE__INIT;
-    update.uuid.data = uuid;
-    update.uuid.len = UUID_SIZE_BYTES;
-
-    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
-    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_CURRENTLY_DISPLAYING_UPDATE;
-    message.currently_displaying_update = &update;
-
-    queue_outbound_message(&message);
-}
-
-void sockets_send_device_info() {
-    Kd__V1__DeviceInfo info = KD__V1__DEVICE_INFO__INIT;
-    info.width = CONFIG_MATRIX_WIDTH;
-    info.height = CONFIG_MATRIX_HEIGHT;
-    info.has_light_sensor = true;
-
-    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
-    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_DEVICE_INFO;
-    message.device_info = &info;
-
-    queue_outbound_message(&message);
-}
-
-void sockets_send_device_config() {
-    handle_device_config_request();
-}
-
-void sockets_send_modify_schedule_item(const uint8_t* uuid, bool pinned, bool skipped) {
-    if (uuid == nullptr) return;
-
-    Kd__V1__ModifyScheduleItem modify = KD__V1__MODIFY_SCHEDULE_ITEM__INIT;
-    modify.uuid.data = const_cast<uint8_t*>(uuid);
-    modify.uuid.len = UUID_SIZE_BYTES;
-    modify.user_pinned = pinned;
-    modify.user_skipped = skipped;
-
-    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
-    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_MODIFY_SCHEDULE_ITEM;
-    message.modify_schedule_item = &modify;
-
-    queue_outbound_message(&message);
-}
-
-void send_render_request_to_server(const uint8_t* uuid) {
-    if (uuid == nullptr) return;
-
-    // Don't queue render requests when not connected
-    if (!sock.is_connected()) {
-        ESP_LOGD(TAG, "Skipping render request - not connected");
-        return;
-    }
-
-    Kd__V1__SpriteRenderRequest request = KD__V1__SPRITE_RENDER_REQUEST__INIT;
-    request.sprite_uuid.data = const_cast<uint8_t*>(uuid);
-    request.sprite_uuid.len = UUID_SIZE_BYTES;
-    request.device_width = CONFIG_MATRIX_WIDTH;
-    request.device_height = CONFIG_MATRIX_HEIGHT;
-
-    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
-    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_SPRITE_RENDER_REQUEST;
-    message.sprite_render_request = &request;
-
-    queue_outbound_message(&message);
-}
-
-void sockets_request_cert_renewal() {
-    if (!sock.is_connected()) {
-        ESP_LOGW(TAG, "Cannot request cert renewal - not connected");
-        return;
-    }
-
-    // Get CSR from crypto storage
-    auto* csr_buf = static_cast<char*>(heap_caps_malloc(CSR_BUFFER_SIZE, MALLOC_CAP_SPIRAM));
-    if (csr_buf == nullptr) {
-        ESP_LOGE(TAG, "Failed to allocate CSR buffer");
-        return;
-    }
-
-    size_t csr_len = CSR_BUFFER_SIZE;
-    esp_err_t err = crypto_get_csr(csr_buf, &csr_len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get CSR: %s", esp_err_to_name(err));
-        heap_caps_free(csr_buf);
-        return;
-    }
-
-    ESP_LOGI(TAG, "Sending cert renewal request with CSR (%zu bytes)", csr_len);
-
-    Kd__V1__RenewCertRequest request = KD__V1__RENEW_CERT_REQUEST__INIT;
-    request.csr.data = reinterpret_cast<uint8_t*>(csr_buf);
-    request.csr.len = csr_len;
-
-    Kd__V1__MatrxMessage message = KD__V1__MATRX_MESSAGE__INIT;
-    message.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_RENEW_CERT_REQUEST;
-    message.renew_cert_request = &request;
-
-    queue_outbound_message(&message);
-
-    heap_caps_free(csr_buf);
 }

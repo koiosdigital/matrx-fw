@@ -13,8 +13,9 @@
 #include "kd_common.h"
 
 #include "display.h"
+#include "webp_player.h"
 #include "sockets.h"
-#include "sprites.h"
+#include "apps.h"
 #include "scheduler.h"
 #include "daughterboard.h"
 #include "config.h"
@@ -28,19 +29,31 @@ extern "C" void app_main(void)
 
     display_init();
 
-    ESP_LOGD(TAG, "post display Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
+    // Initialize WebP player after display
+    esp_err_t ret = webp_player_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize WebP player: %s", esp_err_to_name(ret));
+    }
+
+    // Show boot sprite
+    show_fs_sprite("boot");
+    vTaskDelay(pdMS_TO_TICKS(1200));
+
+    ESP_LOGI(TAG, "post display Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
 
     // Initialize daughterboard (light sensor and buttons)
-    esp_err_t ret = daughterboard_init();
+    ret = daughterboard_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize daughterboard: %s", esp_err_to_name(ret));
     }
+
+    ESP_LOGI(TAG, "post daughterboard Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
 
     // Check if factory reset buttons are pressed (handle before kd_common_init)
     bool factory_reset_requested = daughterboard_is_button_pressed(0) && daughterboard_is_button_pressed(2);
 
     // Handle factory reset BEFORE kd_common_init
-    if (factory_reset_requested) {
+    if (factory_reset_requested && false) {
         ESP_LOGI(TAG, "Factory reset buttons detected, showing hold sprite");
         show_fs_sprite("factory_reset_hold");
 
@@ -73,15 +86,22 @@ extern "C" void app_main(void)
     kd_common_set_provisioning_pop_token_format(ProvisioningPOPTokenFormat_t::NUMERIC_6);
 
     // Show keygen sprite if key generation will occur
-    #ifndef KD_COMMON_CRYPTO_DISABLE
+#ifndef KD_COMMON_CRYPTO_DISABLE
     if (kd_common_crypto_will_generate_key()) {
         show_fs_sprite("keygen");
     }
-    #endif
+#endif
 
     kd_common_init();
 
-    ESP_LOGD(TAG, "post kdc Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
+    ESP_LOGI(TAG, "post kdc Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
+
+    // Initialize app manager
+    apps_init();
+
+    // Initialize scheduler (registers event handlers)
+    scheduler_init();
+    scheduler_start();
 
     // Initialize config module after kd_common_init (which initializes NVS)
     ret = config_init();
@@ -89,19 +109,8 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Failed to initialize config module: %s", esp_err_to_name(ret));
     }
 
-    scheduler_init();
-
-    // Register button event handlers for scheduler
-    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED,
-        [](void*, esp_event_base_t, int32_t, void*) { scheduler_handle_button_prev(); }, nullptr);
-    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED,
-        [](void*, esp_event_base_t, int32_t, void*) { scheduler_handle_button_pin(); }, nullptr);
-    esp_event_handler_register(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED,
-        [](void*, esp_event_base_t, int32_t, void*) { scheduler_handle_button_next(); }, nullptr);
-
-    ESP_LOGD(TAG, "post scheduler Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
     sockets_init();
 
-    ESP_LOGD(TAG, "post sockets Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
-    vTaskSuspend(nullptr);
+    ESP_LOGI(TAG, "post sockets Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
+    vTaskDelete(nullptr);
 }
