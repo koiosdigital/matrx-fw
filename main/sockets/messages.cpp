@@ -6,9 +6,11 @@
 #include <esp_app_desc.h>
 #include <esp_timer.h>
 #include <kd_common.h>
+#include <kd/v1/common.pb-c.h>
 
 #include "apps.h"
 #include "config.h"
+#include "../components/kd_common/src/crypto.h"
 
 static const char* TAG = "messages";
 
@@ -189,4 +191,36 @@ void msg_send_schedule_request() {
     msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_SCHEDULE_REQUEST;
     msg.schedule_request = &req;
     msg_queue(&msg);
+}
+
+void msg_send_cert_renewal_request() {
+    // Get CSR from crypto module
+    size_t csr_len = 4096;
+    auto* csr = static_cast<char*>(heap_caps_malloc(csr_len, MALLOC_CAP_SPIRAM));
+    if (csr == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate CSR buffer");
+        return;
+    }
+
+    esp_err_t err = crypto_get_csr(csr, &csr_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get CSR: %s", esp_err_to_name(err));
+        heap_caps_free(csr);
+        return;
+    }
+
+    Kd__V1__RenewCertRequest req = KD__V1__RENEW_CERT_REQUEST__INIT;
+    req.csr.data = reinterpret_cast<uint8_t*>(csr);
+    req.csr.len = csr_len;
+
+    Kd__V1__MatrxMessage msg = KD__V1__MATRX_MESSAGE__INIT;
+    msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_RENEW_CERT_REQUEST;
+    msg.renew_cert_request = &req;
+
+    bool sent = msg_queue(&msg);
+    heap_caps_free(csr);
+
+    if (sent) {
+        ESP_LOGI(TAG, "Sent cert renewal request");
+    }
 }

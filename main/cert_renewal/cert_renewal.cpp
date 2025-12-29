@@ -12,6 +12,7 @@
 #include <kd_common.h>
 #include "../components/kd_common/src/crypto.h"
 #include <kd/v1/matrx.pb-c.h>
+#include "../sockets/messages.h"
 
 static const char* TAG = "cert_renewal";
 
@@ -20,8 +21,8 @@ namespace {
 // Check cert expiry every 24 hours
 constexpr int64_t CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-// Renew when less than 1 year remaining
-constexpr int64_t RENEWAL_THRESHOLD_SEC = 365 * 24 * 60 * 60;
+// Renew when less than 3 years remaining
+constexpr int64_t RENEWAL_THRESHOLD_SEC = 3LL * 365 * 24 * 60 * 60;
 
 // CSR buffer size
 constexpr size_t CSR_BUFFER_SIZE = 4096;
@@ -83,13 +84,19 @@ void cert_renewal_init(const char** cert, size_t* cert_len) {
 }
 
 bool cert_renewal_check() {
-    if (renewal_in_progress) return false;
+    ESP_LOGI(TAG, "Checking certificate renewal status");
+
+    if (renewal_in_progress) {
+        ESP_LOGD(TAG, "Renewal already in progress");
+        return false;
+    }
 
     // Check if system time is valid (after 2024)
     time_t now;
     time(&now);
     struct tm* tm_now = localtime(&now);
     if (tm_now == nullptr || tm_now->tm_year < 124) {
+        ESP_LOGW(TAG, "System time not valid yet (year=%d)", tm_now ? tm_now->tm_year + 1900 : 0);
         return false;
     }
 
@@ -97,6 +104,7 @@ bool cert_renewal_check() {
 
     // Only check periodically
     if (last_check_ms > 0 && (now_ms - last_check_ms) < CHECK_INTERVAL_MS) {
+        ESP_LOGD(TAG, "Skipping check, last check was %lld ms ago", now_ms - last_check_ms);
         return false;
     }
     last_check_ms = now_ms;
@@ -108,7 +116,8 @@ bool cert_renewal_check() {
     }
 
     int64_t days_remaining = seconds_remaining / (24 * 60 * 60);
-    ESP_LOGI(TAG, "Certificate expires in %lld days", days_remaining);
+    int64_t threshold_days = RENEWAL_THRESHOLD_SEC / (24 * 60 * 60);
+    ESP_LOGI(TAG, "Certificate expires in %lld days (threshold: %lld days)", days_remaining, threshold_days);
 
     if (seconds_remaining <= RENEWAL_THRESHOLD_SEC) {
         ESP_LOGI(TAG, "Certificate expiring soon, requesting renewal");
@@ -117,6 +126,7 @@ bool cert_renewal_check() {
         return true;
     }
 
+    ESP_LOGI(TAG, "Certificate valid, no renewal needed");
     return false;
 }
 
@@ -154,14 +164,5 @@ bool cert_renewal_handle_response(Kd__V1__CertResponse* response) {
 }
 
 void cert_renewal_send_request() {
-    // NOTE: This function needs access to sockets outbox queue
-    // For now, just log - caller should integrate with their message sending
-    ESP_LOGI(TAG, "Cert renewal request would be sent here");
-
-    // The actual implementation would need to:
-    // 1. Get CSR via crypto_get_csr()
-    // 2. Build Kd__V1__RenewCertRequest message
-    // 3. Queue it to sockets outbox
-    //
-    // This is left as a stub since we're decoupling from sockets
+    msg_send_cert_renewal_request();
 }

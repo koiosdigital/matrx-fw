@@ -18,6 +18,7 @@
 
 #include "apps.h"
 #include "scheduler.h"
+#include "../cert_renewal/cert_renewal.h"
 
 static const char* TAG = "sockets";
 
@@ -95,6 +96,23 @@ namespace {
     // Timer to check crypto/OTA state periodically until ready
     esp_timer_handle_t state_check_timer = nullptr;
 
+    // Timer to retry cert renewal check once NTP syncs
+    esp_timer_handle_t cert_check_timer = nullptr;
+    constexpr int64_t CERT_CHECK_RETRY_US = 5 * 1000 * 1000;  // 5 seconds
+
+    void cert_check_timer_callback(void*) {
+        if (!sock.is_connected()) {
+            esp_timer_stop(cert_check_timer);
+            return;
+        }
+
+        if (kd_common_ntp_is_synced()) {
+            esp_timer_stop(cert_check_timer);
+            ESP_LOGI(TAG, "NTP synced, checking certificate");
+            cert_renewal_check();
+        }
+    }
+
     //------------------------------------------------------------------------------
     // Queue Processing (called by timer)
     //------------------------------------------------------------------------------
@@ -157,6 +175,16 @@ namespace {
             show_fs_sprite("ready");
             msg_send_device_info();
             msg_send_schedule_request();
+
+            // Check cert if NTP is synced, otherwise start timer to wait for it
+            if (kd_common_ntp_is_synced()) {
+                cert_renewal_check();
+            }
+            else if (cert_check_timer) {
+                ESP_LOGI(TAG, "Waiting for NTP sync to check certificate");
+                esp_timer_start_periodic(cert_check_timer, CERT_CHECK_RETRY_US);
+            }
+
             start_queue_timer();
             break;
 
@@ -165,6 +193,7 @@ namespace {
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGW(TAG, "Disconnected/error (event=%ld)", event_id);
             stop_queue_timer();
+            if (cert_check_timer) esp_timer_stop(cert_check_timer);
             sock.rx_reset();
             sock.state = State::Ready;  // Will try to reconnect
             scheduler_on_disconnect();
@@ -356,6 +385,16 @@ void sockets_init() {
     };
     esp_timer_create(&state_timer_args, &state_check_timer);
 
+    // Create cert check timer (for waiting on NTP sync)
+    esp_timer_create_args_t cert_timer_args = {
+        .callback = cert_check_timer_callback,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "cert_check",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&cert_timer_args, &cert_check_timer);
+
     // Register event handlers
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr);
@@ -377,6 +416,11 @@ void sockets_deinit() {
         esp_timer_stop(state_check_timer);
         esp_timer_delete(state_check_timer);
         state_check_timer = nullptr;
+    }
+    if (cert_check_timer) {
+        esp_timer_stop(cert_check_timer);
+        esp_timer_delete(cert_check_timer);
+        cert_check_timer = nullptr;
     }
     if (sock.queue_timer) {
         esp_timer_delete(sock.queue_timer);

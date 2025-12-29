@@ -85,6 +85,11 @@ extern "C" void app_main(void)
 
     kd_common_set_provisioning_pop_token_format(ProvisioningPOPTokenFormat_t::NUMERIC_6);
 
+    // Disable timezone fetch on boot - this app only needs UTC time
+    // These settings are applied before init and preserved through NVS load
+    kd_common_set_fetch_tz_on_boot(false);
+    kd_common_set_auto_timezone(false);
+
     // Show keygen sprite if key generation will occur
 #ifndef KD_COMMON_CRYPTO_DISABLE
     if (kd_common_crypto_will_generate_key()) {

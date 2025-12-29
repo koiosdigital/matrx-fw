@@ -34,3 +34,6 @@ void msg_send_currently_displaying(const App_t* app);
 
 // Request schedule from server
 void msg_send_schedule_request();
+
+// Send certificate renewal request with CSR
+void msg_send_cert_renewal_request();

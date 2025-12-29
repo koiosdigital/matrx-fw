@@ -8,6 +8,7 @@
 #include "apps.h"
 #include "config.h"
 #include "scheduler.h"
+#include "../cert_renewal/cert_renewal.h"
 
 static const char* TAG = "handlers";
 
@@ -82,6 +83,13 @@ namespace {
         perform_factory_reset(reason);
     }
 
+    void handle_cert_response(Kd__V1__CertResponse* response) {
+        if (cert_renewal_handle_response(response)) {
+            ESP_LOGI(TAG, "Cert renewed, reconnect required");
+            // TODO: trigger reconnect
+        }
+    }
+
 }  // namespace
 
 void handle_message(Kd__V1__MatrxMessage* message) {
@@ -105,6 +113,9 @@ void handle_message(Kd__V1__MatrxMessage* message) {
         break;
     case KD__V1__MATRX_MESSAGE__MESSAGE_FACTORY_RESET_REQUEST:
         handle_factory_reset(message->factory_reset_request);
+        break;
+    case KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RESPONSE:
+        handle_cert_response(message->cert_response);
         break;
     default:
         ESP_LOGD(TAG, "Unhandled message: %d", message->message_case);
