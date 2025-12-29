@@ -24,6 +24,7 @@ typedef struct ScheduleFlags_t {
     unsigned pinned : 1;
     unsigned skipped_user : 1;
     unsigned skipped_server : 1;
+    unsigned has_received_response : 1;  // Server has responded at least once
     unsigned display_time : 6;  // 0-63 seconds
 } ScheduleFlags_t;
 

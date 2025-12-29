@@ -156,11 +156,20 @@ struct SchedulerState {
     // --- Display helpers ---
 
     void display_current() {
-        if (current_item >= item_count || !is_displayable(items[current_item])) {
+        if (current_item >= item_count) {
             display_clear();
             return;
         }
         auto& item = items[current_item];
+        if (!is_displayable(item)) {
+            // Only blank the screen if we've received a response from the server
+            // (i.e., we previously had data or server explicitly gave us nothing)
+            if (item.flags.has_received_response) {
+                display_clear();
+            }
+            // Otherwise keep showing whatever was on screen before
+            return;
+        }
         show_sprite(item.sprite);
         sockets_send_currently_displaying((uint8_t*)item.uuid);
     }
@@ -293,7 +302,10 @@ void handle_advance() {
             sched.display_current();
         } else {
             current.render_state = RenderState::NeedsRender;
-            display_clear();  // Blank screen while waiting for data
+            // Only blank if we've previously received data from server
+            if (current.flags.has_received_response) {
+                display_clear();
+            }
         }
         return;
     }
@@ -393,16 +405,20 @@ void scheduler_task_func(void*) {
                 int32_t next = find_next_displayable(sched.current_item);
                 if (next >= 0) {
                     sched.advance_to(next);
-                } else {
-                    // No displayable items at all - blank the screen
+                } else if (current.flags.has_received_response) {
+                    // No displayable items and we've received a response - blank the screen
                     display_clear();
                 }
             }
         }
 
         // Also check if we have no displayable items at all (e.g., single pinned item that's server-skipped)
+        // Only blank if at least one item has received a server response
         if (!has_any_displayable()) {
-            display_clear();
+            auto& current = sched.items[sched.current_item];
+            if (current.flags.has_received_response) {
+                display_clear();
+            }
         }
     }
 }
@@ -609,6 +625,9 @@ void scheduler_handle_render_response(const uint8_t* uuid, const uint8_t* data, 
     }
 
     bool is_current = (&sched.items[sched.current_item] == item);
+
+    // Mark that server has responded (enables blanking logic for this item)
+    item->flags.has_received_response = true;
 
     // Server error or empty data
     if (server_error || data == nullptr || len == 0) {
