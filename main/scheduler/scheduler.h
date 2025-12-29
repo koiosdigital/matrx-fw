@@ -24,6 +24,9 @@ void scheduler_on_schedule_received(void);
 // Called by handlers.cpp when render response arrives
 void scheduler_on_render_response(const uint8_t* uuid, bool success);
 
+// Called by sockets.cpp when connected
+void scheduler_on_connect(void);
+
 // Called by sockets.cpp when connection is lost
 void scheduler_on_disconnect(void);
 

@@ -154,6 +154,14 @@ namespace {
 
         // Error tracking
         int decode_error_count = 0;
+
+        // Display mode - when true, NEED_NEXT events are emitted
+        // Set by scheduler when sockets connect/disconnect
+        std::atomic<bool> display_mode{ false };
+
+        // NEED_NEXT tracking - emitted when RAM app is invalid
+        bool need_next_pending = false;
+        TickType_t last_need_next_tick = 0;
     };
 
     PlayerContext player;
@@ -271,6 +279,11 @@ namespace {
 
     void emit_stopped_event() {
         esp_event_post(WEBP_PLAYER_EVENTS, WEBP_PLAYER_EVT_STOPPED,
+            nullptr, 0, 0);
+    }
+
+    void emit_need_next_event() {
+        esp_event_post(WEBP_PLAYER_EVENTS, WEBP_PLAYER_EVT_NEED_NEXT,
             nullptr, 0, 0);
     }
 
@@ -455,21 +468,38 @@ namespace {
     void handle_play_command(const PlayParams* params) {
         PlayerState current_state = player.state.load();
 
+        ESP_LOGI(TAG, "Play command: source=%s, immediate=%d, state=%d",
+            params->source_type == WEBP_SOURCE_RAM ? "RAM" : "embedded",
+            params->immediate, static_cast<int>(current_state));
+
         if (params->immediate || current_state == PlayerState::IDLE) {
             // Stop current and start new
             destroy_decoder();
             player.current.reset();
             player.next.clear();
 
-            if (start_playback(params) != ESP_OK) {
+            esp_err_t err = start_playback(params);
+            if (err == ESP_OK) {
+                // Success - clear need_next state
+                player.need_next_pending = false;
+                ESP_LOGI(TAG, "Playback started successfully");
+            } else {
+                ESP_LOGE(TAG, "start_playback failed: %s", esp_err_to_name(err));
                 player.state.store(PlayerState::IDLE);
                 display_clear();
+                // If this was a RAM app that failed and we're in display mode, request next
+                if (params->source_type == WEBP_SOURCE_RAM && player.display_mode.load()) {
+                    player.need_next_pending = true;
+                    player.last_need_next_tick = xTaskGetTickCount();
+                    emit_need_next_event();
+                    ESP_LOGI(TAG, "Need next app (invalid RAM app)");
+                }
             }
         }
         else {
             // Queue as next
             player.next.set(params);
-            ESP_LOGI(TAG, "Queued next app");
+            ESP_LOGI(TAG, "Queued next app (player busy)");
         }
     }
 
@@ -616,7 +646,15 @@ namespace {
 
             switch (state) {
             case PlayerState::IDLE:
-                // Wait for commands
+                // Check if we need to emit NEED_NEXT periodically (only in display mode)
+                if (player.need_next_pending && player.display_mode.load()) {
+                    TickType_t now = xTaskGetTickCount();
+                    if ((now - player.last_need_next_tick) >= pdMS_TO_TICKS(WEBP_PLAYER_NEED_NEXT_MS)) {
+                        emit_need_next_event();
+                        player.last_need_next_tick = now;
+                        ESP_LOGD(TAG, "Need next app (periodic)");
+                    }
+                }
                 vTaskDelay(pdMS_TO_TICKS(50));
                 break;
 
@@ -782,4 +820,32 @@ bool webp_player_is_playing() {
 
 bool webp_player_is_paused() {
     return player.state.load() == PlayerState::PAUSED;
+}
+
+void webp_player_set_display_mode(bool enabled) {
+    player.display_mode.store(enabled);
+    if (!enabled) {
+        // Exiting display mode - clear need_next state
+        player.need_next_pending = false;
+    }
+    ESP_LOGI(TAG, "Display mode: %s", enabled ? "enabled" : "disabled");
+}
+
+void webp_player_request_next() {
+    if (!player.display_mode.load()) {
+        // Not in display mode - ignore
+        return;
+    }
+
+    // If already pending, don't emit duplicate event
+    if (player.need_next_pending) {
+        ESP_LOGD(TAG, "Request next: already pending");
+        return;
+    }
+
+    // Set pending flag and emit immediately
+    player.need_next_pending = true;
+    player.last_need_next_tick = xTaskGetTickCount();
+    emit_need_next_event();
+    ESP_LOGI(TAG, "Requested next app");
 }

@@ -53,7 +53,7 @@ extern "C" void app_main(void)
     bool factory_reset_requested = daughterboard_is_button_pressed(0) && daughterboard_is_button_pressed(2);
 
     // Handle factory reset BEFORE kd_common_init
-    if (factory_reset_requested && false) {
+    if (factory_reset_requested) {
         ESP_LOGI(TAG, "Factory reset buttons detected, showing hold sprite");
         show_fs_sprite("factory_reset_hold");
 

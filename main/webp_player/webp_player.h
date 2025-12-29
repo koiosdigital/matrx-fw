@@ -18,6 +18,7 @@ extern "C" {
 //------------------------------------------------------------------------------
 
 #define WEBP_PLAYER_PREPARE_NEXT_MS     5000    // When to emit PREPARE_NEXT before duration ends
+#define WEBP_PLAYER_NEED_NEXT_MS        1000    // Interval for NEED_NEXT when idle with invalid content
 #define WEBP_PLAYER_RETRY_COUNT         3       // Decode error retries
 #define WEBP_PLAYER_RETRY_DELAY_MS      200     // Delay between retries
 #define WEBP_PLAYER_TASK_STACK_SIZE     4096
@@ -44,6 +45,7 @@ typedef enum {
     WEBP_PLAYER_EVT_ERROR,          // Decode error after retries
     WEBP_PLAYER_EVT_PREPARE_NEXT,   // Request next app (~5s before end)
     WEBP_PLAYER_EVT_STOPPED,        // Player has stopped
+    WEBP_PLAYER_EVT_NEED_NEXT,      // No valid content, need displayable app (sent once/sec)
 } webp_player_event_id_t;
 
 //------------------------------------------------------------------------------
@@ -177,6 +179,23 @@ bool webp_player_is_playing(void);
  * @return true if in PAUSED state
  */
 bool webp_player_is_paused(void);
+
+/**
+ * Set display mode.
+ * When enabled, NEED_NEXT events are emitted when no valid RAM app is loaded.
+ * When disabled (boot/OTA/disconnected), embedded sprites play without NEED_NEXT.
+ *
+ * @param enabled true when sockets connected, false otherwise
+ */
+void webp_player_set_display_mode(bool enabled);
+
+/**
+ * Request next app.
+ * Call this when the current app is not displayable (no data).
+ * If in display mode, emits NEED_NEXT event immediately and starts periodic emission.
+ * If not in display mode, does nothing.
+ */
+void webp_player_request_next(void);
 
 #ifdef __cplusplus
 }

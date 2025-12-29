@@ -1,3 +1,4 @@
+// Sockets - Event-driven WebSocket client
 #include "sockets.h"
 #include "handlers.h"
 #include "messages.h"
@@ -7,9 +8,9 @@
 #include <esp_event.h>
 #include <esp_wifi.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 
 #include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <freertos/queue.h>
 
 #include <kd_common.h>
@@ -28,9 +29,7 @@ namespace {
 
     constexpr size_t QUEUE_SIZE = 4;
     constexpr size_t MAX_MSG_SIZE = 100 * 1024;  // 100KB
-
-    constexpr uint32_t TASK_STACK = 4096;
-    constexpr UBaseType_t TASK_PRIORITY = 5;
+    constexpr int64_t QUEUE_POLL_US = 50 * 1000;  // 50ms timer for queue processing
 
     //------------------------------------------------------------------------------
     // SPIRAM Allocator for Protobuf
@@ -59,6 +58,7 @@ namespace {
         WaitingForCrypto,
         WaitingForOTA,
         Ready,
+        Connected,
     };
 
     struct QueuedMessage {
@@ -67,10 +67,10 @@ namespace {
     };
 
     struct {
-        TaskHandle_t task = nullptr;
         QueueHandle_t outbox = nullptr;
         QueueHandle_t inbox = nullptr;
         esp_websocket_client_handle_t client = nullptr;
+        esp_timer_handle_t queue_timer = nullptr;
         State state = State::WaitingForNetwork;
 
         // Receive buffer
@@ -88,6 +88,60 @@ namespace {
         }
     } sock;
 
+    // Forward declarations
+    void try_advance_state();
+    void process_queues();
+
+    // Timer to check crypto/OTA state periodically until ready
+    esp_timer_handle_t state_check_timer = nullptr;
+
+    //------------------------------------------------------------------------------
+    // Queue Processing (called by timer)
+    //------------------------------------------------------------------------------
+
+    void queue_timer_callback(void*) {
+        process_queues();
+    }
+
+    void process_queues() {
+        if (!sock.is_connected()) return;
+
+        // Send outbound
+        QueuedMessage out;
+        while (xQueueReceive(sock.outbox, &out, 0) == pdTRUE) {
+            if (out.data && sock.is_connected()) {
+                esp_websocket_client_send_bin(sock.client,
+                    reinterpret_cast<char*>(out.data), out.len, pdMS_TO_TICKS(5000));
+            }
+            if (out.data) heap_caps_free(out.data);
+        }
+
+        // Process inbound
+        QueuedMessage in;
+        while (xQueueReceive(sock.inbox, &in, 0) == pdTRUE) {
+            if (in.data) {
+                auto* msg = kd__v1__matrx_message__unpack(&spiram_allocator, in.len, in.data);
+                if (msg) {
+                    handle_message(msg);
+                    kd__v1__matrx_message__free_unpacked(msg, &spiram_allocator);
+                }
+                heap_caps_free(in.data);
+            }
+        }
+    }
+
+    void start_queue_timer() {
+        if (sock.queue_timer) {
+            esp_timer_start_periodic(sock.queue_timer, QUEUE_POLL_US);
+        }
+    }
+
+    void stop_queue_timer() {
+        if (sock.queue_timer) {
+            esp_timer_stop(sock.queue_timer);
+        }
+    }
+
     //------------------------------------------------------------------------------
     // WebSocket Events
     //------------------------------------------------------------------------------
@@ -98,16 +152,21 @@ namespace {
         switch (event_id) {
         case WEBSOCKET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Connected");
+            sock.state = State::Connected;
+            scheduler_on_connect();
             show_fs_sprite("ready");
             msg_send_device_info();
             msg_send_schedule_request();
+            start_queue_timer();
             break;
 
         case WEBSOCKET_EVENT_DISCONNECTED:
         case WEBSOCKET_EVENT_CLOSED:
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGW(TAG, "Disconnected/error (event=%ld)", event_id);
+            stop_queue_timer();
             sock.rx_reset();
+            sock.state = State::Ready;  // Will try to reconnect
             scheduler_on_disconnect();
             break;
 
@@ -155,17 +214,6 @@ namespace {
         }
     }
 
-    void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void*) {
-        if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-            sock.state = State::WaitingForNetwork;
-        }
-        else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-            if (sock.state == State::WaitingForNetwork) {
-                sock.state = State::WaitingForCrypto;
-            }
-        }
-    }
-
     //------------------------------------------------------------------------------
     // WebSocket Client
     //------------------------------------------------------------------------------
@@ -184,96 +232,90 @@ namespace {
         if (!sock.client) return ESP_FAIL;
 
         esp_websocket_register_events(sock.client, WEBSOCKET_EVENT_ANY, ws_event_handler, nullptr);
-        return esp_websocket_client_start(sock.client);
+
+        esp_err_t err = esp_websocket_client_start(sock.client);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Client started");
+        }
+        return err;
     }
 
     //------------------------------------------------------------------------------
-    // Main Task
+    // State Machine (event-driven)
     //------------------------------------------------------------------------------
 
-    void sockets_task(void*) {
-        esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler, nullptr);
-        esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr);
+    void try_advance_state() {
+        switch (sock.state) {
+        case State::WaitingForNetwork:
+            // Handled by IP event
+            break;
 
-        if (kd_common_is_wifi_connected()) {
-            sock.state = State::WaitingForCrypto;
-        }
-
-        bool started = false;
-
-        while (true) {
-            // State machine
-            switch (sock.state) {
-            case State::WaitingForNetwork:
-                vTaskDelay(pdMS_TO_TICKS(500));
-                continue;
-
-            case State::WaitingForCrypto:
-                if (kd_common_crypto_get_state() == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
+        case State::WaitingForCrypto:
+            if (kd_common_crypto_get_state() == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
 #ifdef ENABLE_OTA
-                    sock.state = State::WaitingForOTA;
-                    show_fs_sprite("check_updates");
-#else
-                    sock.state = State::Ready;
-#endif
-                }
-                else {
-                    vTaskDelay(pdMS_TO_TICKS(500));
-                }
-                continue;
-
-            case State::WaitingForOTA:
-#ifdef ENABLE_OTA
-                if (kd_common_ota_has_completed_boot_check()) {
-                    sock.state = State::Ready;
-                }
-                else {
-                    vTaskDelay(pdMS_TO_TICKS(500));
-                }
+                sock.state = State::WaitingForOTA;
+                show_fs_sprite("check_updates");
+                try_advance_state();  // Check OTA immediately
 #else
                 sock.state = State::Ready;
+                try_advance_state();
 #endif
-                continue;
-
-            case State::Ready:
-                if (!started) {
-                    show_fs_sprite("connecting");
-                    if (start_client() == ESP_OK) {
-                        ESP_LOGI(TAG, "Client started");
-                        started = true;
-                    }
-                    else {
-                        vTaskDelay(pdMS_TO_TICKS(5000));
-                    }
-                    continue;
-                }
-                break;
             }
+            break;
 
-            // Send outbound
-            QueuedMessage out;
-            while (xQueueReceive(sock.outbox, &out, 0) == pdTRUE) {
-                if (out.data && sock.is_connected()) {
-                    esp_websocket_client_send_bin(sock.client,
-                        reinterpret_cast<char*>(out.data), out.len, pdMS_TO_TICKS(5000));
-                }
-                if (out.data) heap_caps_free(out.data);
+        case State::WaitingForOTA:
+#ifdef ENABLE_OTA
+            if (kd_common_ota_has_completed_boot_check()) {
+                sock.state = State::Ready;
+                try_advance_state();
             }
+#else
+            sock.state = State::Ready;
+            try_advance_state();
+#endif
+            break;
 
-            // Process inbound
-            QueuedMessage in;
-            while (xQueueReceive(sock.inbox, &in, 0) == pdTRUE) {
-                if (in.data) {
-                    auto* msg = kd__v1__matrx_message__unpack(&spiram_allocator, in.len, in.data);
-                    if (msg) {
-                        handle_message(msg);
-                        kd__v1__matrx_message__free_unpacked(msg, &spiram_allocator);
-                    }
-                    heap_caps_free(in.data);
-                }
+        case State::Ready:
+            show_fs_sprite("connecting");
+            start_client();
+            break;
+
+        case State::Connected:
+            // Already connected, nothing to do
+            break;
+        }
+    }
+
+    //------------------------------------------------------------------------------
+    // Event Handlers
+    //------------------------------------------------------------------------------
+
+    void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void*) {
+        if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+            if (sock.state != State::WaitingForNetwork) {
+                sock.state = State::WaitingForNetwork;
+                stop_queue_timer();
             }
+        }
+        else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+            if (sock.state == State::WaitingForNetwork) {
+                sock.state = State::WaitingForCrypto;
+                // Start state polling timer
+                if (state_check_timer) {
+                    esp_timer_start_periodic(state_check_timer, 100 * 1000);  // 100ms
+                }
+                try_advance_state();
+            }
+        }
+    }
 
-            vTaskDelay(pdMS_TO_TICKS(50));
+    void state_check_callback(void*) {
+        if (sock.state == State::WaitingForCrypto || sock.state == State::WaitingForOTA) {
+            try_advance_state();
+        }
+        else {
+            // No longer need to poll
+            esp_timer_stop(state_check_timer);
         }
     }
 
@@ -294,22 +336,57 @@ void sockets_init() {
 
     msg_init(sock.outbox);
 
-    xTaskCreatePinnedToCore(sockets_task, "sockets", TASK_STACK, nullptr,
-        TASK_PRIORITY, &sock.task, 1);
+    // Create queue processing timer
+    esp_timer_create_args_t queue_timer_args = {
+        .callback = queue_timer_callback,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "sock_queue",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&queue_timer_args, &sock.queue_timer);
 
-    ESP_LOGI(TAG, "Initialized");
+    // Create state check timer (for crypto/OTA polling)
+    esp_timer_create_args_t state_timer_args = {
+        .callback = state_check_callback,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "sock_state",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&state_timer_args, &state_check_timer);
+
+    // Register event handlers
+    esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler, nullptr);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr);
+
+    // Check if already connected
+    if (kd_common_is_wifi_connected()) {
+        sock.state = State::WaitingForCrypto;
+        // Start state polling timer
+        esp_timer_start_periodic(state_check_timer, 100 * 1000);  // 100ms
+        try_advance_state();
+    }
+
+    ESP_LOGI(TAG, "Initialized (event-driven)");
 }
 
 void sockets_deinit() {
+    stop_queue_timer();
+    if (state_check_timer) {
+        esp_timer_stop(state_check_timer);
+        esp_timer_delete(state_check_timer);
+        state_check_timer = nullptr;
+    }
+    if (sock.queue_timer) {
+        esp_timer_delete(sock.queue_timer);
+        sock.queue_timer = nullptr;
+    }
+
     if (sock.client) {
         esp_websocket_client_stop(sock.client);
         esp_websocket_client_destroy(sock.client);
         sock.client = nullptr;
-    }
-
-    if (sock.task) {
-        vTaskDelete(sock.task);
-        sock.task = nullptr;
     }
 
     sock.rx_reset();

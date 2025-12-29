@@ -13,6 +13,7 @@
 #include "webp_player.h"
 #include "display.h"
 #include "messages.h"
+#include "sockets.h"
 
 static const char* TAG = "scheduler";
 
@@ -22,7 +23,6 @@ namespace {
     // Constants
     //------------------------------------------------------------------------------
 
-    constexpr size_t MAX_PENDING = 5;
     constexpr int64_t RETRY_INTERVAL_US = 10 * 1000 * 1000;  // 10 seconds in microseconds
 
     //------------------------------------------------------------------------------
@@ -35,10 +35,6 @@ namespace {
         bool has_schedule = false;
         bool running = false;
 
-        // Render request tracking (avoid duplicate requests)
-        uint8_t pending_uuids[MAX_PENDING][16] = {};
-        size_t pending_count = 0;
-
         // Retry timer for when nothing displayable
         esp_timer_handle_t retry_timer = nullptr;
     };
@@ -46,55 +42,13 @@ namespace {
     SchedulerState state;
 
     //------------------------------------------------------------------------------
-    // Pending UUID Tracking
-    //------------------------------------------------------------------------------
-
-    bool is_pending(const uint8_t* uuid) {
-        for (size_t i = 0; i < state.pending_count; i++) {
-            if (std::memcmp(state.pending_uuids[i], uuid, 16) == 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void add_pending(const uint8_t* uuid) {
-        if (state.pending_count >= MAX_PENDING || is_pending(uuid)) {
-            return;
-        }
-        std::memcpy(state.pending_uuids[state.pending_count], uuid, 16);
-        state.pending_count++;
-    }
-
-    void remove_pending(const uint8_t* uuid) {
-        for (size_t i = 0; i < state.pending_count; i++) {
-            if (std::memcmp(state.pending_uuids[i], uuid, 16) == 0) {
-                // Shift remaining entries down
-                for (size_t j = i; j < state.pending_count - 1; j++) {
-                    std::memcpy(state.pending_uuids[j], state.pending_uuids[j + 1], 16);
-                }
-                state.pending_count--;
-                return;
-            }
-        }
-    }
-
-    void clear_pending() {
-        state.pending_count = 0;
-    }
-
-    //------------------------------------------------------------------------------
     // Render Request
     //------------------------------------------------------------------------------
 
     void request_render(App_t* app) {
-        if (!app || is_pending(app->uuid)) {
-            //return;
-        }
+        if (!app) return;
 
-        //add_pending(app->uuid);
         msg_request_app_render(app);
-
         ESP_LOGD(TAG, "Requested render for %02x%02x...", app->uuid[0], app->uuid[1]);
     }
 
@@ -172,22 +126,27 @@ namespace {
 
     void play_app_at_index(size_t idx) {
         App_t* app = apps_get_by_index(idx);
-        if (!app) return;
+        if (!app) {
+            ESP_LOGW(TAG, "play_app_at_index(%zu): app is null", idx);
+            return;
+        }
 
         state.current_idx = idx;
+        bool displayable = app_is_displayable(app);
+        ESP_LOGI(TAG, "play_app_at_index(%zu): displayable=%d, len=%zu", idx, displayable, app->len);
 
-        if (app_is_displayable(app)) {
+        if (displayable) {
             stop_retry_timer();
             webp_player_play_app(app, app->display_time * 1000, true);
             ESP_LOGI(TAG, "Playing app at index %zu (duration: %us)",
                 idx, app->display_time);
         }
         else {
-            // No data - blank screen and request render
-            display_clear();
+            // No data - request render and trigger NEED_NEXT if in display mode
             request_render(app);
+            webp_player_request_next();
 
-            // Start retry timer
+            // Start retry timer as backup
             start_retry_timer();
 
             ESP_LOGI(TAG, "App at index %zu has no data, requesting render", idx);
@@ -215,8 +174,8 @@ namespace {
                 webp_player_play_app(current, current->display_time * 1000, true);
             }
             else {
-                display_clear();
                 request_render(current);
+                webp_player_request_next();
                 start_retry_timer();
             }
             ESP_LOGI(TAG, "Pinned app - staying on index %zu", state.current_idx);
@@ -230,10 +189,7 @@ namespace {
             play_app_at_index(static_cast<size_t>(next));
         }
         else {
-            // No displayable items
-            display_clear();
-
-            // Request render for all non-skipped apps
+            // No displayable items - request renders and trigger NEED_NEXT
             for (size_t i = 0; i < count; i++) {
                 App_t* app = apps_get_by_index(i);
                 if (app && !app->skipped) {
@@ -241,6 +197,7 @@ namespace {
                 }
             }
 
+            webp_player_request_next();
             start_retry_timer();
             ESP_LOGW(TAG, "No displayable apps, starting retry timer");
         }
@@ -302,6 +259,25 @@ namespace {
         advance_to_next();
     }
 
+    void on_need_next() {
+        if (!state.running || !state.has_schedule) return;
+
+        // Find next displayable app and play it
+        int next = find_next_displayable(state.current_idx, true);
+        if (next >= 0) {
+            ESP_LOGI(TAG, "NEED_NEXT: found displayable app at index %d", next);
+            play_app_at_index(static_cast<size_t>(next));
+        }
+        else {
+            // No displayable app found, try from beginning
+            next = find_next_displayable(0, false);
+            if (next >= 0) {
+                ESP_LOGI(TAG, "NEED_NEXT: fallback to index %d", next);
+                play_app_at_index(static_cast<size_t>(next));
+            }
+        }
+    }
+
     void webp_player_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
         switch (event_id) {
         case WEBP_PLAYER_EVT_PLAYING:
@@ -315,6 +291,9 @@ namespace {
             break;
         case WEBP_PLAYER_EVT_ERROR:
             on_error(static_cast<webp_player_error_evt_t*>(event_data));
+            break;
+        case WEBP_PLAYER_EVT_NEED_NEXT:
+            on_need_next();
             break;
         }
     }
@@ -378,7 +357,6 @@ void scheduler_on_schedule_received() {
     }
 
     state.has_schedule = true;
-    clear_pending();
     stop_retry_timer();
 
     // Find pinned app, or first non-skipped app
@@ -423,8 +401,6 @@ void scheduler_on_schedule_received() {
 void scheduler_on_render_response(const uint8_t* uuid, bool success) {
     if (!uuid) return;
 
-    remove_pending(uuid);
-
     App_t* app = app_find(uuid);
     if (!app) {
         ESP_LOGW(TAG, "Render response for unknown app");
@@ -437,7 +413,7 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success) {
         // Stop retry timer - we have displayable content
         stop_retry_timer();
 
-        // Check if this is the current app - play it immediately (interrupts embedded sprites)
+        // Check if this is the current app - play it immediately
         App_t* current = apps_get_by_index(state.current_idx);
 
         if (app == current) {
@@ -445,12 +421,17 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success) {
             webp_player_play_app(app, app->display_time * 1000, true);
             ESP_LOGI(TAG, "Current app now has data, playing");
         }
-        else if (!webp_player_is_playing() && !webp_player_is_paused()) {
-            // Player is idle - find and play next displayable app
+        else if (!current || !app_is_displayable(current)) {
+            // Current app is null or not displayable - find and play first displayable
             int idx = find_next_displayable(0, false);
             if (idx >= 0) {
                 play_app_at_index(static_cast<size_t>(idx));
+                ESP_LOGI(TAG, "Current app not displayable, playing index %d", idx);
             }
+        }
+        else {
+            // Current app is playing fine, this render was for a future app
+            ESP_LOGD(TAG, "Render for non-current app, ignoring");
         }
     }
     else {
@@ -459,10 +440,19 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success) {
     }
 }
 
+void scheduler_on_connect() {
+    // Enable display mode - NEED_NEXT events can now be emitted
+    webp_player_set_display_mode(true);
+
+    ESP_LOGI(TAG, "Connected - display mode enabled");
+}
+
 void scheduler_on_disconnect() {
     state.has_schedule = false;
-    clear_pending();
     stop_retry_timer();
+
+    // Disable display mode - no NEED_NEXT events during reconnect
+    webp_player_set_display_mode(false);
 
     // Show connecting sprite
     webp_player_play_embedded("connecting", true);
