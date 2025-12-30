@@ -8,3 +8,5 @@ void sockets_deinit();
 
 // Check if connected to server
 bool sockets_is_connected();
+
+#define SOCKETS_URL "wss://device.api.koiosdigital.net"

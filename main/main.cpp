@@ -99,6 +99,11 @@ extern "C" void app_main(void)
 
     kd_common_init();
 
+    // Debug: Test DS peripheral signing
+#ifndef KD_COMMON_CRYPTO_DISABLE
+    kd_common_crypto_test_ds_signing();
+#endif
+
     ESP_LOGI(TAG, "post kdc Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
 
     // Initialize app manager

@@ -9,6 +9,7 @@
 #include <esp_wifi.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <esp_crt_bundle.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -94,6 +95,11 @@ namespace {
 
     // Timer to check crypto/OTA state periodically until ready
     esp_timer_handle_t state_check_timer = nullptr;
+
+    // mTLS certificate data (cached for reconnections)
+    esp_ds_data_ctx_t* static_ds_data_ctx = nullptr;
+    char* static_cert = nullptr;
+    size_t static_cert_len = 0;
 
     //------------------------------------------------------------------------------
     // Queue Processing (called by timer)
@@ -221,15 +227,52 @@ namespace {
 
     esp_err_t start_client() {
         if (sock.client) {
+            ESP_LOGW(TAG, "Client already initialized, destroying first");
             esp_websocket_client_destroy(sock.client);
             sock.client = nullptr;
         }
 
+        // Initialize certificate data if not already cached
+        if (static_cert == nullptr) {
+            static_ds_data_ctx = kd_common_crypto_get_ctx();
+            if (static_ds_data_ctx == nullptr) {
+                ESP_LOGE(TAG, "Failed to get DS context");
+                return ESP_FAIL;
+            }
+
+            // First call to get required length
+            static_cert_len = 0;
+            esp_err_t ret = kd_common_get_device_cert(nullptr, &static_cert_len);
+            if (ret != ESP_OK || static_cert_len == 0) {
+                ESP_LOGE(TAG, "Failed to get device certificate length: %s", esp_err_to_name(ret));
+                return ret;
+            }
+
+            static_cert = static_cast<char*>(heap_caps_calloc(static_cert_len + 1, sizeof(char), MALLOC_CAP_SPIRAM));
+            if (static_cert == nullptr) {
+                ESP_LOGE(TAG, "Failed to allocate certificate buffer");
+                return ESP_ERR_NO_MEM;
+            }
+
+            ret = kd_common_get_device_cert(static_cert, &static_cert_len);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to get device certificate: %s", esp_err_to_name(ret));
+                heap_caps_free(static_cert);
+                static_cert = nullptr;
+                return ret;
+            }
+            ESP_LOGI(TAG, "Loaded device certificate (%zu bytes)", static_cert_len);
+        }
+
         esp_websocket_client_config_t cfg = {};
-        cfg.uri = "ws://192.168.0.112:9091";
+        cfg.uri = SOCKETS_URL;
+        cfg.port = 443;
+        cfg.client_cert = static_cert;
+        cfg.client_cert_len = static_cert_len + 1;  // Include null terminator for PEM
+        cfg.client_ds_data = static_ds_data_ctx;
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
         cfg.reconnect_timeout_ms = 2500;
         cfg.network_timeout_ms = 2500;
-        cfg.enable_close_reconnect = true;
 
         sock.client = esp_websocket_client_init(&cfg);
         if (!sock.client) return ESP_FAIL;
@@ -238,7 +281,7 @@ namespace {
 
         esp_err_t err = esp_websocket_client_start(sock.client);
         if (err == ESP_OK) {
-            ESP_LOGI(TAG, "Client started");
+            ESP_LOGI(TAG, "Client started with mTLS");
         }
         return err;
     }
@@ -403,6 +446,18 @@ void sockets_deinit() {
     }
 
     sock.rx_reset();
+
+    // Cleanup mTLS certificate data
+    if (static_cert) {
+        heap_caps_free(static_cert);
+        static_cert = nullptr;
+        static_cert_len = 0;
+    }
+    if (static_ds_data_ctx) {
+        free(static_ds_data_ctx->esp_ds_data);
+        free(static_ds_data_ctx);
+        static_ds_data_ctx = nullptr;
+    }
 
     QueuedMessage msg;
     if (sock.outbox) {
