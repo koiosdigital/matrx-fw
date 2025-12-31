@@ -57,7 +57,6 @@ namespace {
     enum class State : uint8_t {
         WaitingForNetwork,
         WaitingForCrypto,
-        WaitingForOTA,
         Ready,
         Connected,
     };
@@ -339,31 +338,11 @@ namespace {
                 static_cast<int>(crypto_state),
                 static_cast<int>(CryptoState_t::CRYPTO_STATE_VALID_CERT));
             if (crypto_state == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
-#ifdef ENABLE_OTA
-                ESP_LOGI(TAG, "State -> WaitingForOTA");
-                sock.state = State::WaitingForOTA;
-                show_fs_sprite("check_updates");
-                try_advance_state();  // Check OTA immediately
-#else
                 sock.state = State::Ready;
                 try_advance_state();
-#endif
             }
             break;
         }
-
-        case State::WaitingForOTA:
-#ifdef ENABLE_OTA
-            if (kd_common_ota_has_completed_boot_check()) {
-                ESP_LOGI(TAG, "State -> Ready");
-                sock.state = State::Ready;
-                try_advance_state();
-            }
-#else
-            sock.state = State::Ready;
-            try_advance_state();
-#endif
-            break;
 
         case State::Ready:
             show_fs_sprite("connecting");
@@ -403,7 +382,7 @@ namespace {
     }
 
     void state_check_callback(void*) {
-        if (sock.state == State::WaitingForCrypto || sock.state == State::WaitingForOTA) {
+        if (sock.state == State::WaitingForCrypto) {
             try_advance_state();
         }
         else {
