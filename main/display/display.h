@@ -11,17 +11,6 @@ extern "C" {
 #endif
 
 //------------------------------------------------------------------------------
-// Status Bar Configuration
-//------------------------------------------------------------------------------
-
-typedef struct DisplayStatusBar_t {
-    bool enabled = false;
-    uint8_t r = 0;
-    uint8_t g = 0;
-    uint8_t b = 0;
-} DisplayStatusBar_t;
-
-//------------------------------------------------------------------------------
 // Lifecycle
 //------------------------------------------------------------------------------
 
@@ -69,22 +58,6 @@ void display_clear();
  * @param brightness 0-255
  */
 void display_set_brightness(uint8_t brightness);
-
-/**
- * Enable status bar overlay with specified color.
- * Draws a 1-pixel line at top of display.
- */
-void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b);
-
-/**
- * Disable status bar overlay.
- */
-void display_clear_status_bar();
-
-/**
- * Get current status bar configuration.
- */
-DisplayStatusBar_t display_get_status_bar();
 
 //------------------------------------------------------------------------------
 // Utility

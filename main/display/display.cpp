@@ -17,6 +17,8 @@
 
 #include <cstring>
 
+#include "sockets.h"
+
 static const char* TAG = "display";
 
 namespace {
@@ -27,7 +29,6 @@ namespace {
     // Display state
     struct DisplayState {
         MatrixPanel_I2S_DMA* dma_display = nullptr;
-        DisplayStatusBar_t status_bar = { false, 0, 0, 0 };
     };
 
     DisplayState disp;
@@ -142,6 +143,9 @@ namespace {
             webp_player_play_embedded("setup", true);
         }
         else if (event_id == WIFI_PROV_END) {
+            // Don't show connecting if already connected to websocket
+            if (sockets_is_connected()) return;
+
             wifi_config_t wifi_cfg;
             if (esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg) == ESP_OK &&
                 std::strlen(reinterpret_cast<const char*>(wifi_cfg.sta.ssid)) != 0) {
@@ -218,12 +222,6 @@ void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height)
             px++;
         }
     }
-
-    // Draw status bar overlay if enabled
-    if (disp.status_bar.enabled) {
-        disp.dma_display->drawFastHLine(0, 0, width,
-            disp.status_bar.r, disp.status_bar.g, disp.status_bar.b);
-    }
 #endif
 }
 
@@ -244,12 +242,6 @@ void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
                 rgb_buffer[px], rgb_buffer[px + 1], rgb_buffer[px + 2]);
         }
     }
-
-    // Draw status bar overlay if enabled
-    if (disp.status_bar.enabled) {
-        disp.dma_display->drawFastHLine(0, 0, CONFIG_MATRIX_WIDTH,
-            disp.status_bar.r, disp.status_bar.g, disp.status_bar.b);
-    }
 #endif
 }
 
@@ -269,21 +261,6 @@ void display_set_brightness(uint8_t brightness) {
 #else
     ESP_LOGW(TAG, "Display is not enabled, cannot set brightness");
 #endif
-}
-
-void display_clear_status_bar() {
-    disp.status_bar.enabled = false;
-}
-
-void display_set_status_bar(uint8_t r, uint8_t g, uint8_t b) {
-    disp.status_bar.enabled = true;
-    disp.status_bar.r = r;
-    disp.status_bar.g = g;
-    disp.status_bar.b = b;
-}
-
-DisplayStatusBar_t display_get_status_bar() {
-    return disp.status_bar;
 }
 
 size_t display_get_buffer_size() {
