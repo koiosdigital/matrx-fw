@@ -92,6 +92,8 @@ namespace {
     // Forward declarations
     void try_advance_state();
     void process_queues();
+    void schedule_reconnect();
+    esp_err_t start_client();
 
     // Timer to check crypto/OTA state periodically until ready
     esp_timer_handle_t state_check_timer = nullptr;
@@ -100,6 +102,10 @@ namespace {
     esp_ds_data_ctx_t* static_ds_data_ctx = nullptr;
     char* static_cert = nullptr;
     size_t static_cert_len = 0;
+
+    // Reconnect timer
+    esp_timer_handle_t reconnect_timer = nullptr;
+    constexpr int64_t RECONNECT_DELAY_US = 2000 * 1000;  // 2 seconds
 
     //------------------------------------------------------------------------------
     // Queue Processing (called by timer)
@@ -149,6 +155,30 @@ namespace {
     }
 
     //------------------------------------------------------------------------------
+    // Reconnection
+    //------------------------------------------------------------------------------
+
+    void reconnect_timer_callback(void*) {
+        ESP_LOGI(TAG, "Reconnect timer fired, destroying old client");
+        if (sock.client) {
+            esp_websocket_client_destroy(sock.client);
+            sock.client = nullptr;
+        }
+        if (sock.state == State::Ready) {
+            start_client();
+        }
+    }
+
+    void schedule_reconnect() {
+        if (reconnect_timer) {
+            // Stop any pending reconnect first
+            esp_timer_stop(reconnect_timer);
+            esp_timer_start_once(reconnect_timer, RECONNECT_DELAY_US);
+            ESP_LOGI(TAG, "Scheduled reconnect in %lld ms", RECONNECT_DELAY_US / 1000);
+        }
+    }
+
+    //------------------------------------------------------------------------------
     // WebSocket Events
     //------------------------------------------------------------------------------
 
@@ -173,8 +203,13 @@ namespace {
             ESP_LOGW(TAG, "Disconnected/error (event=%ld)", event_id);
             stop_queue_timer();
             sock.rx_reset();
-            sock.state = State::Ready;  // Will try to reconnect
-            scheduler_on_disconnect();
+            if (sock.state == State::Connected) {
+                sock.state = State::Ready;
+                scheduler_on_disconnect();
+                show_fs_sprite("connecting");
+                // Schedule reconnection via timer (can't block in event handler)
+                schedule_reconnect();
+            }
             break;
 
         case WEBSOCKET_EVENT_DATA:
@@ -273,6 +308,8 @@ namespace {
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
         cfg.reconnect_timeout_ms = 2500;
         cfg.network_timeout_ms = 2500;
+
+        cfg.enable_close_reconnect = true;
 
         sock.client = esp_websocket_client_init(&cfg);
         if (!sock.client) return ESP_FAIL;
@@ -412,6 +449,16 @@ void sockets_init() {
     };
     esp_timer_create(&state_timer_args, &state_check_timer);
 
+    // Create reconnect timer
+    esp_timer_create_args_t reconnect_timer_args = {
+        .callback = reconnect_timer_callback,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "sock_reconn",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&reconnect_timer_args, &reconnect_timer);
+
     // Register event handlers
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr);
@@ -429,6 +476,11 @@ void sockets_init() {
 
 void sockets_deinit() {
     stop_queue_timer();
+    if (reconnect_timer) {
+        esp_timer_stop(reconnect_timer);
+        esp_timer_delete(reconnect_timer);
+        reconnect_timer = nullptr;
+    }
     if (state_check_timer) {
         esp_timer_stop(state_check_timer);
         esp_timer_delete(state_check_timer);
