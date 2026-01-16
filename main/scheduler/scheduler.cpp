@@ -14,6 +14,7 @@
 #include "display.h"
 #include "messages.h"
 #include "sockets.h"
+#include "daughterboard.h"
 
 static const char* TAG = "scheduler";
 
@@ -142,14 +143,14 @@ namespace {
                 idx, app->display_time);
         }
         else {
-            // No data - request render and trigger NEED_NEXT if in display mode
+            // No data - request render and show ready screen while waiting
             request_render(app);
-            webp_player_request_next();
+            webp_player_play_embedded("ready", true);
 
             // Start retry timer as backup
             start_retry_timer();
 
-            ESP_LOGI(TAG, "App at index %zu has no data, requesting render", idx);
+            ESP_LOGI(TAG, "App at index %zu has no data, showing ready screen", idx);
         }
     }
 
@@ -327,6 +328,20 @@ void scheduler_init() {
         nullptr
     );
 
+    // Register for button events (A = prev, C = next)
+    esp_event_handler_register(
+        DAUGHTERBOARD_EVENTS,
+        DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED,
+        [](void*, esp_event_base_t, int32_t, void*) { scheduler_prev(); },
+        nullptr
+    );
+    esp_event_handler_register(
+        DAUGHTERBOARD_EVENTS,
+        DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED,
+        [](void*, esp_event_base_t, int32_t, void*) { scheduler_next(); },
+        nullptr
+    );
+
     ESP_LOGI(TAG, "Scheduler initialized");
 }
 
@@ -350,9 +365,9 @@ void scheduler_on_schedule_received() {
 
     if (count == 0) {
         state.has_schedule = false;
-        display_clear();
         stop_retry_timer();
-        ESP_LOGI(TAG, "Empty schedule received");
+        webp_player_play_embedded("ready", true);
+        ESP_LOGI(TAG, "Empty schedule received, showing ready screen");
         return;
     }
 
@@ -390,9 +405,16 @@ void scheduler_on_schedule_received() {
         play_app_at_index(static_cast<size_t>(start_idx));
     }
     else {
-        // All apps are user-skipped
+        // All apps are user-skipped - request renders anyway, blank screen
+        for (size_t i = 0; i < count; i++) {
+            App_t* app = apps_get_by_index(i);
+            if (app) {
+                request_render(app);
+            }
+        }
         display_clear();
-        ESP_LOGW(TAG, "All apps are skipped");
+        start_retry_timer();
+        ESP_LOGW(TAG, "All apps are skipped, requesting renders");
     }
 
     ESP_LOGI(TAG, "Schedule received: %zu apps, starting at index %d", count, start_idx);
@@ -465,4 +487,33 @@ void scheduler_on_disconnect() {
 const uint8_t* scheduler_get_current_uuid() {
     App_t* app = apps_get_by_index(state.current_idx);
     return app ? app->uuid : nullptr;
+}
+
+void scheduler_next() {
+    if (!state.running || !state.has_schedule) return;
+    size_t count = apps_count();
+    if (count == 0) return;
+
+    int next = find_next_displayable(state.current_idx, true);
+    if (next >= 0) {
+        play_app_at_index(static_cast<size_t>(next));
+        ESP_LOGI(TAG, "Button: next -> index %d", next);
+    }
+}
+
+void scheduler_prev() {
+    if (!state.running || !state.has_schedule) return;
+    size_t count = apps_count();
+    if (count == 0) return;
+
+    // Search backwards for previous displayable
+    for (size_t i = 1; i <= count; i++) {
+        size_t idx = (state.current_idx + count - i) % count;
+        App_t* app = apps_get_by_index(idx);
+        if (app && app_is_displayable(app)) {
+            play_app_at_index(idx);
+            ESP_LOGI(TAG, "Button: prev -> index %zu", idx);
+            return;
+        }
+    }
 }

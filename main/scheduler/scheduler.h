@@ -33,6 +33,10 @@ void scheduler_on_disconnect(void);
 // Get current app UUID (for debugging/logging)
 const uint8_t* scheduler_get_current_uuid(void);
 
+// Navigate to next/previous app in schedule (button control)
+void scheduler_next(void);
+void scheduler_prev(void);
+
 #ifdef __cplusplus
 }
 #endif

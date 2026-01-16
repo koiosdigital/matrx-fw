@@ -69,8 +69,9 @@ void light_timer_cb(void*) {
     uint16_t raw = 0;
     if (veml_read(VEML6030_REG_ALS, &raw) == ESP_OK) {
         last_lux = (uint16_t)(raw * LUX_RESOLUTION + 0.5f);
+        light_reading_t reading = { .raw = raw };
         esp_event_post(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_LIGHT_READING,
-                       &last_lux, sizeof(last_lux), 0);
+                       &reading, sizeof(reading), 0);
     }
 }
 
@@ -148,4 +149,8 @@ uint16_t daughterboard_get_lux() {
 bool daughterboard_is_button_pressed(uint8_t id) {
     if (id >= NUM_BUTTONS) return false;
     return !gpio_get_level(BUTTON_GPIOS[id]);
+}
+
+esp_err_t daughterboard_set_veml_config(uint16_t config) {
+    return veml_write(VEML6030_REG_ALS_CONF, config);
 }

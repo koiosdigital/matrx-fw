@@ -19,6 +19,7 @@
 #include "scheduler.h"
 #include "daughterboard.h"
 #include "config.h"
+#include "auto_brightness.h"
 
 static const char* TAG = "main";
 
@@ -113,6 +114,9 @@ extern "C" void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize config module: %s", esp_err_to_name(ret));
     }
+
+    // Initialize auto brightness (registers event handler for light readings)
+    auto_brightness_init();
 
     sockets_init();
 
