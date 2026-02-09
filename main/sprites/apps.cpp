@@ -4,7 +4,7 @@
 #include <cstring>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
-#include <mbedtls/sha256.h>
+#include <psa/crypto.h>
 
 #include "webp_player.h"
 #include "static_files.h"
@@ -368,7 +368,9 @@ bool app_transfer_finalize(App_t* app) {
 
     // Verify SHA256
     uint8_t computed_sha256[32];
-    mbedtls_sha256(app->transfer.buffer, app->transfer.total_size, computed_sha256, 0);
+    size_t hash_len;
+    psa_hash_compute(PSA_ALG_SHA_256, app->transfer.buffer, app->transfer.total_size,
+                     computed_sha256, sizeof(computed_sha256), &hash_len);
 
     if (std::memcmp(computed_sha256, app->transfer.expected_sha256, 32) != 0) {
         ESP_LOGE(TAG, "SHA256 mismatch, discarding transfer");

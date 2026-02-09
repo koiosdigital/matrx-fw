@@ -36,10 +36,19 @@ namespace {
             return;
         }
 
+        // Empty response = clear app data (render succeeded but no data)
+        if (response->total_size == 0) {
+            ESP_LOGI(TAG, "App render response: empty (clearing data)");
+            app_clear_data(app);
+            memset(app->sha256, 0, sizeof(app->sha256));
+            scheduler_on_render_response(response->app_uuid.data, true);
+            return;
+        }
+
         // Chunked transfer: allocate buffer and wait for chunks
-        if (response->total_size == 0 || response->total_chunks == 0) {
-            ESP_LOGW(TAG, "Invalid render response: size=%u, chunks=%u",
-                     response->total_size, response->total_chunks);
+        if (response->total_chunks == 0) {
+            ESP_LOGW(TAG, "Invalid render response: size=%u but chunks=0",
+                     response->total_size);
             scheduler_on_render_response(response->app_uuid.data, false);
             return;
         }
