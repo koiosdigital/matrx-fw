@@ -20,7 +20,6 @@ namespace {
     int64_t g_last_claim_ms = 0;
 
     constexpr int64_t CLAIM_RETRY_MS = 5000;
-    constexpr size_t CLAIM_TOKEN_MAX = 2048;
 
 }  // namespace
 
@@ -84,10 +83,16 @@ void msg_send_claim_if_needed() {
         return;
     }
 
-    auto* token = static_cast<uint8_t*>(heap_caps_malloc(CLAIM_TOKEN_MAX, MALLOC_CAP_SPIRAM));
+    // Query actual token length first
+    size_t token_len = 0;
+    if (kd_common_get_claim_token(nullptr, &token_len) != ESP_OK || token_len == 0) {
+        return;
+    }
+
+    // Allocate only what's needed
+    auto* token = static_cast<uint8_t*>(heap_caps_malloc(token_len, MALLOC_CAP_SPIRAM));
     if (token == nullptr) return;
 
-    size_t token_len = CLAIM_TOKEN_MAX;
     if (kd_common_get_claim_token(reinterpret_cast<char*>(token), &token_len) != ESP_OK || token_len == 0) {
         free(token);
         return;
@@ -109,6 +114,9 @@ void msg_send_claim_if_needed() {
 }
 
 void msg_upload_coredump() {
+    // Coredump upload temporarily disabled for RAM optimization
+    // TODO: Implement chunked streaming when re-enabling
+    /*
     const esp_partition_t* part = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, "coredump");
     if (part == nullptr) return;
@@ -152,6 +160,7 @@ void msg_upload_coredump() {
     }
 
     free(data);
+    */
 }
 
 void msg_request_app_render(const App_t* app) {
@@ -190,38 +199,6 @@ void msg_send_schedule_request() {
     msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_SCHEDULE_REQUEST;
     msg.schedule_request = &req;
     msg_queue(&msg);
-}
-
-void msg_send_cert_report() {
-    size_t cert_len = 0;
-    if (kd_common_get_device_cert(nullptr, &cert_len) != ESP_OK || cert_len == 0) {
-        ESP_LOGW(TAG, "No device certificate to report");
-        return;
-    }
-
-    auto* cert_buf = static_cast<uint8_t*>(heap_caps_malloc(cert_len, MALLOC_CAP_SPIRAM));
-    if (cert_buf == nullptr) {
-        ESP_LOGE(TAG, "Failed to allocate cert buffer");
-        return;
-    }
-
-    if (kd_common_get_device_cert(reinterpret_cast<char*>(cert_buf), &cert_len) != ESP_OK) {
-        heap_caps_free(cert_buf);
-        return;
-    }
-
-    Kd__V1__CertReport report = KD__V1__CERT_REPORT__INIT;
-    report.current_cert.data = cert_buf;
-    report.current_cert.len = cert_len;
-
-    Kd__V1__MatrxMessage msg = KD__V1__MATRX_MESSAGE__INIT;
-    msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_CERT_REPORT;
-    msg.cert_report = &report;
-
-    msg_queue(&msg);
-    heap_caps_free(cert_buf);
-
-    ESP_LOGI(TAG, "Sent cert report (%zu bytes)", cert_len);
 }
 
 void msg_send_cert_renew_request(const char* csr, size_t csr_len) {

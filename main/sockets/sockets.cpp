@@ -15,6 +15,7 @@
 #include <freertos/queue.h>
 
 #include <kd_common.h>
+#include <kd_ota.h>
 #include <kd/v1/matrx.pb-c.h>
 
 #include "apps.h"
@@ -57,6 +58,7 @@ namespace {
     enum class State : uint8_t {
         WaitingForNetwork,
         WaitingForCrypto,
+        WaitingForOTA,
         Ready,
         Connected,
     };
@@ -191,7 +193,6 @@ namespace {
             scheduler_on_connect();
             show_fs_sprite("ready");
             msg_send_device_info();
-            msg_send_cert_report();
             msg_send_schedule_request();
             start_queue_timer();
             break;
@@ -334,13 +335,25 @@ namespace {
 
         case State::WaitingForCrypto: {
             CryptoState_t crypto_state = kd_common_crypto_get_state();
-            ESP_LOGI(TAG, "WaitingForCrypto: crypto_state=%d (need=%d)",
-                static_cast<int>(crypto_state),
-                static_cast<int>(CryptoState_t::CRYPTO_STATE_VALID_CERT));
             if (crypto_state == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
+                sock.state = State::WaitingForOTA;
+                try_advance_state();
+            }
+            break;
+        }
+
+        case State::WaitingForOTA: {
+#ifdef ENABLE_OTA
+            bool ota_done = kd_common_ota_has_completed_boot_check();
+            if (ota_done) {
                 sock.state = State::Ready;
                 try_advance_state();
             }
+#else
+            // OTA disabled, skip directly to Ready
+            sock.state = State::Ready;
+            try_advance_state();
+#endif
             break;
         }
 
@@ -361,7 +374,6 @@ namespace {
 
     void wifi_event_handler(void*, esp_event_base_t base, int32_t id, void*) {
         if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-            ESP_LOGI(TAG, "WiFi disconnected event");
             if (sock.state != State::WaitingForNetwork) {
                 sock.state = State::WaitingForNetwork;
                 stop_queue_timer();
@@ -371,10 +383,8 @@ namespace {
             ESP_LOGI(TAG, "Got IP event, state=%d", static_cast<int>(sock.state));
             if (sock.state == State::WaitingForNetwork) {
                 sock.state = State::WaitingForCrypto;
-                ESP_LOGI(TAG, "State -> WaitingForCrypto");
-                // Start state polling timer
                 if (state_check_timer) {
-                    esp_timer_start_periodic(state_check_timer, 100 * 1000);  // 100ms
+                    esp_timer_start_periodic(state_check_timer, 1000 * 1000);  // 1s
                 }
                 try_advance_state();
             }
@@ -382,7 +392,7 @@ namespace {
     }
 
     void state_check_callback(void*) {
-        if (sock.state == State::WaitingForCrypto) {
+        if (sock.state == State::WaitingForCrypto || sock.state == State::WaitingForOTA) {
             try_advance_state();
         }
         else {
@@ -446,11 +456,9 @@ void sockets_init() {
     if (kd_common_is_wifi_connected()) {
         sock.state = State::WaitingForCrypto;
         // Start state polling timer
-        esp_timer_start_periodic(state_check_timer, 100 * 1000);  // 100ms
+        esp_timer_start_periodic(state_check_timer, 1000 * 1000);  // 1s
         try_advance_state();
     }
-
-    ESP_LOGI(TAG, "Initialized (event-driven)");
 }
 
 void sockets_deinit() {

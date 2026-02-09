@@ -4,7 +4,7 @@
 #include <esp_event.h>
 #include <esp_timer.h>
 #include <driver/gpio.h>
-#include <driver/i2c.h>
+#include <driver/i2c_master.h>
 
 static const char* TAG = "daughterboard";
 
@@ -12,99 +12,100 @@ ESP_EVENT_DEFINE_BASE(DAUGHTERBOARD_EVENTS);
 
 namespace {
 
-// VEML6030 registers
-constexpr uint8_t VEML6030_REG_ALS_CONF = 0x00;
-constexpr uint8_t VEML6030_REG_PSM      = 0x03;
-constexpr uint8_t VEML6030_REG_ALS      = 0x04;
+    // VEML6030 registers
+    constexpr uint8_t VEML6030_REG_ALS_CONF = 0x00;
+    constexpr uint8_t VEML6030_REG_PSM = 0x03;
+    constexpr uint8_t VEML6030_REG_ALS = 0x04;
 
-// VEML6030 config: gain 2x, 100ms integration, no interrupt
-constexpr uint16_t VEML6030_CONFIG = 0x0800;  // GAIN_2 | IT_100MS
+    // VEML6030 config: gain 2x, 100ms integration, no interrupt
+    constexpr uint16_t VEML6030_CONFIG = 0x0800;  // GAIN_2 | IT_100MS
 
-// Lux conversion factor for gain 2x and 100ms integration
-constexpr float LUX_RESOLUTION = 0.0288f;
+    // Lux conversion factor for gain 2x and 100ms integration
+    constexpr float LUX_RESOLUTION = 0.0288f;
 
-// Button GPIOs
-constexpr gpio_num_t BUTTON_GPIOS[] = {
-    DAUGHTERBOARD_BUTTON_A_GPIO,
-    DAUGHTERBOARD_BUTTON_B_GPIO,
-    DAUGHTERBOARD_BUTTON_C_GPIO
-};
-constexpr size_t NUM_BUTTONS = 3;
+    // Button GPIOs
+    constexpr gpio_num_t BUTTON_GPIOS[] = {
+        DAUGHTERBOARD_BUTTON_A_GPIO,
+        DAUGHTERBOARD_BUTTON_B_GPIO,
+        DAUGHTERBOARD_BUTTON_C_GPIO
+    };
+    constexpr size_t NUM_BUTTONS = 3;
 
-// State
-esp_timer_handle_t light_timer = nullptr;
-uint64_t button_last_isr[NUM_BUTTONS] = {};
-uint16_t last_lux = 0;
+    // State
+    esp_timer_handle_t light_timer = nullptr;
+    uint64_t button_last_isr[NUM_BUTTONS] = {};
+    uint16_t last_lux = 0;
+    i2c_master_dev_handle_t veml_dev = nullptr;
 
-// I2C helpers
-esp_err_t veml_write(uint8_t reg, uint16_t val) {
-    uint8_t data[3] = { reg, (uint8_t)(val & 0xFF), (uint8_t)(val >> 8) };
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (VEML6030_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write(cmd, data, 3, true);
-    i2c_master_stop(cmd);
-    esp_err_t ret = i2c_master_cmd_begin(DAUGHTERBOARD_I2C_PORT, cmd, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(cmd);
-    return ret;
-}
-
-esp_err_t veml_read(uint8_t reg, uint16_t* val) {
-    uint8_t data[2] = {};
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (VEML6030_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, reg, true);
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (VEML6030_I2C_ADDR << 1) | I2C_MASTER_READ, true);
-    i2c_master_read(cmd, data, 2, I2C_MASTER_LAST_NACK);
-    i2c_master_stop(cmd);
-    esp_err_t ret = i2c_master_cmd_begin(DAUGHTERBOARD_I2C_PORT, cmd, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(cmd);
-    if (ret == ESP_OK) *val = (data[1] << 8) | data[0];
-    return ret;
-}
-
-void light_timer_cb(void*) {
-    uint16_t raw = 0;
-    if (veml_read(VEML6030_REG_ALS, &raw) == ESP_OK) {
-        last_lux = (uint16_t)(raw * LUX_RESOLUTION + 0.5f);
-        light_reading_t reading = { .raw = raw };
-        esp_event_post(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_LIGHT_READING,
-                       &reading, sizeof(reading), 0);
+    // I2C helpers
+    esp_err_t veml_write(uint8_t reg, uint16_t val) {
+        uint8_t data[3] = { reg, (uint8_t)(val & 0xFF), (uint8_t)(val >> 8) };
+        return i2c_master_transmit(veml_dev, data, sizeof(data), 100);
     }
-}
 
-void IRAM_ATTR button_isr(void* arg) {
-    size_t id = (size_t)arg;
-    if (id >= NUM_BUTTONS) return;
+    esp_err_t veml_read(uint8_t reg, uint16_t* val) {
+        uint8_t data[2] = {};
+        esp_err_t ret = i2c_master_transmit_receive(veml_dev, &reg, 1, data, sizeof(data), 100);
+        if (ret == ESP_OK) *val = (data[1] << 8) | data[0];
+        return ret;
+    }
 
-    uint64_t now = esp_timer_get_time();
-    if (now - button_last_isr[id] < 50000) return;  // 50ms debounce
-    button_last_isr[id] = now;
+    void light_timer_cb(void*) {
+        uint16_t raw = 0;
+        if (veml_read(VEML6030_REG_ALS, &raw) == ESP_OK) {
+            last_lux = (uint16_t)(raw * LUX_RESOLUTION + 0.5f);
+            light_reading_t reading = { .raw = raw };
+            esp_event_post(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_LIGHT_READING,
+                &reading, sizeof(reading), 0);
+        }
+    }
 
-    int32_t event = DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED + id;
-    BaseType_t woken = pdFALSE;
-    esp_event_isr_post(DAUGHTERBOARD_EVENTS, event, nullptr, 0, &woken);
-    if (woken) portYIELD_FROM_ISR();
-}
+    void IRAM_ATTR button_isr(void* arg) {
+        size_t id = (size_t)arg;
+        if (id >= NUM_BUTTONS) return;
+
+        uint64_t now = esp_timer_get_time();
+        if (now - button_last_isr[id] < 50000) return;  // 50ms debounce
+        button_last_isr[id] = now;
+
+        int32_t event = DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED + id;
+        BaseType_t woken = pdFALSE;
+        esp_event_isr_post(DAUGHTERBOARD_EVENTS, event, nullptr, 0, &woken);
+        if (woken) portYIELD_FROM_ISR();
+    }
 
 }  // namespace
 
 esp_err_t daughterboard_init() {
-    // Init I2C
-    i2c_config_t i2c_cfg = {};
-    i2c_cfg.mode = I2C_MODE_MASTER;
-    i2c_cfg.sda_io_num = DAUGHTERBOARD_I2C_SDA_GPIO;
-    i2c_cfg.scl_io_num = DAUGHTERBOARD_I2C_SCL_GPIO;
-    i2c_cfg.sda_pullup_en = GPIO_PULLUP_DISABLE;
-    i2c_cfg.scl_pullup_en = GPIO_PULLUP_DISABLE;
-    i2c_cfg.master.clk_speed = DAUGHTERBOARD_I2C_FREQ_HZ;
-
-    esp_err_t ret = i2c_param_config(DAUGHTERBOARD_I2C_PORT, &i2c_cfg);
+    // Init I2C bus
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = DAUGHTERBOARD_I2C_PORT,
+        .sda_io_num = DAUGHTERBOARD_I2C_SDA_GPIO,
+        .scl_io_num = DAUGHTERBOARD_I2C_SCL_GPIO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .intr_priority = 0,
+        .trans_queue_depth = 0,
+        .flags = {
+            .enable_internal_pullup = false,
+            .allow_pd = false,
+        },
+    };
+    i2c_master_bus_handle_t bus = nullptr;
+    esp_err_t ret = i2c_new_master_bus(&bus_cfg, &bus);
     if (ret != ESP_OK) return ret;
 
-    ret = i2c_driver_install(DAUGHTERBOARD_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
+    // Add VEML6030 device
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = VEML6030_I2C_ADDR,
+        .scl_speed_hz = DAUGHTERBOARD_I2C_FREQ_HZ,
+        .scl_wait_us = 0,
+        .flags = {
+            .disable_ack_check = false,
+        },
+    };
+    ret = i2c_master_bus_add_device(bus, &dev_cfg, &veml_dev);
     if (ret != ESP_OK) return ret;
 
     // Init VEML6030

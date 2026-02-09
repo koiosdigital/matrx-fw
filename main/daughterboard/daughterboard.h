@@ -2,14 +2,14 @@
 
 #include <stdint.h>
 #include <driver/gpio.h>
-#include <driver/i2c.h>
+#include <driver/i2c_master.h>
 #include <esp_event.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Button GPIOs
+    // Button GPIOs
 #define DAUGHTERBOARD_BUTTON_A_GPIO  GPIO_NUM_5
 #define DAUGHTERBOARD_BUTTON_B_GPIO  GPIO_NUM_6
 #define DAUGHTERBOARD_BUTTON_C_GPIO  GPIO_NUM_7
@@ -22,31 +22,31 @@ extern "C" {
 #define VEML6030_I2C_ADDR            0x48
 
 // Events
-ESP_EVENT_DECLARE_BASE(DAUGHTERBOARD_EVENTS);
+    ESP_EVENT_DECLARE_BASE(DAUGHTERBOARD_EVENTS);
 
-typedef enum {
-    DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED,
-    DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED,
-    DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED,
-    DAUGHTERBOARD_EVENT_LIGHT_READING,  // event data is light_reading_t
-} daughterboard_event_t;
+    typedef enum {
+        DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED,
+        DAUGHTERBOARD_EVENT_BUTTON_B_PRESSED,
+        DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED,
+        DAUGHTERBOARD_EVENT_LIGHT_READING,  // event data is light_reading_t
+    } daughterboard_event_t;
 
-// Light reading event data (raw value for auto-gain adjustment)
-typedef struct {
-    uint16_t raw;   // Raw ADC value from VEML6030
-} light_reading_t;
+    // Light reading event data (raw value for auto-gain adjustment)
+    typedef struct {
+        uint16_t raw;   // Raw ADC value from VEML6030
+    } light_reading_t;
 
-// Init I2C, light sensor, buttons. Call from main task.
-esp_err_t daughterboard_init(void);
+    // Init I2C, light sensor, buttons. Call from main task.
+    esp_err_t daughterboard_init(void);
 
-// Get last lux reading (updated every second)
-uint16_t daughterboard_get_lux(void);
+    // Get last lux reading (updated every second)
+    uint16_t daughterboard_get_lux(void);
 
-// Check if button currently pressed (0=A, 1=B, 2=C)
-bool daughterboard_is_button_pressed(uint8_t id);
+    // Check if button currently pressed (0=A, 1=B, 2=C)
+    bool daughterboard_is_button_pressed(uint8_t id);
 
-// Set VEML6030 ALS configuration register (gain + integration time)
-esp_err_t daughterboard_set_veml_config(uint16_t config);
+    // Set VEML6030 ALS configuration register (gain + integration time)
+    esp_err_t daughterboard_set_veml_config(uint16_t config);
 
 #ifdef __cplusplus
 }

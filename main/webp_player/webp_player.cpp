@@ -66,9 +66,10 @@ namespace {
         const char* embedded_name = nullptr;
 
         // WebP data (copied for RAM apps, direct for embedded)
-        uint8_t* webp_buffer = nullptr;     // Owned copy for RAM apps
+        uint8_t* webp_buffer = nullptr;     // Owned copy for RAM apps (reused across playbacks)
+        size_t webp_buffer_capacity = 0;    // Allocated size of webp_buffer
         const uint8_t* webp_bytes = nullptr;
-        size_t webp_size = 0;
+        size_t webp_size = 0;               // Actual size of current WebP data
 
         // Duration tracking
         uint32_t requested_duration_ms = 0;
@@ -90,12 +91,11 @@ namespace {
             source_type = WEBP_SOURCE_RAM;
             ram_app = nullptr;
             embedded_name = nullptr;
-            if (webp_buffer) {
-                heap_caps_free(webp_buffer);
-                webp_buffer = nullptr;
-            }
+            // DON'T free webp_buffer here - keep for reuse across playbacks
+            // Buffer is only freed in webp_player_deinit() or when resizing
             webp_bytes = nullptr;
             webp_size = 0;
+            // Keep webp_buffer and webp_buffer_capacity intact for reuse
             requested_duration_ms = 0;
             playback_start_tick = 0;
             loops_completed = 0;
@@ -104,6 +104,14 @@ namespace {
             last_frame_timestamp = 0;
             frame_tick = 0;
             prepare_next_sent = false;
+        }
+
+        void free_buffer() {
+            if (webp_buffer) {
+                heap_caps_free(webp_buffer);
+                webp_buffer = nullptr;
+            }
+            webp_buffer_capacity = 0;
         }
     };
 
@@ -358,18 +366,29 @@ namespace {
                 return ESP_ERR_INVALID_ARG;
             }
 
-            // Copy WebP data (app data may change during playback)
-            player.current.webp_buffer = static_cast<uint8_t*>(
-                heap_caps_malloc(params->ram_app->len, MALLOC_CAP_SPIRAM));
-            if (!player.current.webp_buffer) {
-                ESP_LOGE(TAG, "Failed to alloc %zu bytes", params->ram_app->len);
-                return ESP_ERR_NO_MEM;
+            size_t needed_size = params->ram_app->len;
+
+            // Reuse existing buffer if it fits, otherwise resize
+            if (player.current.webp_buffer == nullptr || player.current.webp_buffer_capacity < needed_size) {
+                // Need larger buffer - free old and allocate new
+                if (player.current.webp_buffer) {
+                    heap_caps_free(player.current.webp_buffer);
+                }
+                player.current.webp_buffer = static_cast<uint8_t*>(
+                    heap_caps_malloc(needed_size, MALLOC_CAP_SPIRAM));
+                if (!player.current.webp_buffer) {
+                    ESP_LOGE(TAG, "Failed to alloc %zu bytes", needed_size);
+                    player.current.webp_buffer_capacity = 0;
+                    return ESP_ERR_NO_MEM;
+                }
+                player.current.webp_buffer_capacity = needed_size;
             }
+            // else: reuse existing buffer (it's large enough)
 
             // Lock app and copy
             xSemaphoreTake(params->ram_app->mutex, portMAX_DELAY);
-            std::memcpy(player.current.webp_buffer, params->ram_app->data, params->ram_app->len);
-            player.current.webp_size = params->ram_app->len;
+            std::memcpy(player.current.webp_buffer, params->ram_app->data, needed_size);
+            player.current.webp_size = needed_size;
             xSemaphoreGive(params->ram_app->mutex);
 
             player.current.webp_bytes = player.current.webp_buffer;
@@ -744,6 +763,7 @@ void webp_player_deinit() {
 
     destroy_decoder();
     player.current.reset();
+    player.current.free_buffer();  // Free the persistent buffer on deinit
     player.next.clear();
 
     if (player.decoder_mutex) {
