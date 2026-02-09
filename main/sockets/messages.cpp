@@ -173,6 +173,8 @@ void msg_request_app_render(const App_t* app) {
     req.data_sha256.data = const_cast<uint8_t*>(app->sha256);
     req.data_sha256.len = 32;
 
+    req.preferred_chunk_size = APP_TRANSFER_CHUNK_SIZE;
+
     Kd__V1__MatrxMessage msg = KD__V1__MATRX_MESSAGE__INIT;
     msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_APP_RENDER_REQUEST;
     msg.app_render_request = &req;

@@ -337,6 +337,7 @@ namespace {
             CryptoState_t crypto_state = kd_common_crypto_get_state();
             if (crypto_state == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
                 sock.state = State::WaitingForOTA;
+                show_fs_sprite("check_updates");
                 try_advance_state();
             }
             break;

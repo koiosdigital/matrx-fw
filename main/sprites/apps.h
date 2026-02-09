@@ -13,6 +13,20 @@ extern "C" {
     // Forward declare protobuf type
     struct Kd__V1__ScheduleItem;
 
+    // Default chunk size for app data transfers (8KB)
+    #define APP_TRANSFER_CHUNK_SIZE 8192
+
+    // Transfer state for chunked data reception
+    typedef struct {
+        uint8_t* buffer;              // Pre-allocated buffer for incoming data
+        size_t total_size;            // Expected total size
+        uint32_t total_chunks;        // Expected number of chunks
+        uint32_t chunks_received;     // Number of chunks received so far
+        uint32_t next_expected;       // Next expected chunk index (for ordering check)
+        uint8_t expected_sha256[32];  // SHA256 to verify after completion
+        bool active;                  // Transfer in progress
+    } AppTransfer_t;
+
     // Single app instance
     typedef struct {
         uint8_t uuid[16];         // 16-byte binary UUID
@@ -23,6 +37,7 @@ extern "C" {
         bool pinned;              // Pinned state (from schedule)
         bool skipped;             // Skipped state (from schedule)
         SemaphoreHandle_t mutex;  // Per-app mutex
+        AppTransfer_t transfer;   // Chunked transfer state
     } App_t;
 
     // Initialization
@@ -41,6 +56,13 @@ extern "C" {
     void app_set_data(App_t* app, const uint8_t* data, size_t len);
     void app_clear_data(App_t* app);
     bool app_is_displayable(App_t* app);
+
+    // Chunked transfer management
+    bool app_transfer_start(App_t* app, size_t total_size, uint32_t total_chunks, const uint8_t* expected_sha256);
+    bool app_transfer_add_chunk(App_t* app, uint32_t chunk_index, const uint8_t* data, size_t len);
+    bool app_transfer_is_complete(App_t* app);
+    bool app_transfer_finalize(App_t* app);  // Verifies SHA256 and moves to app->data
+    void app_transfer_cancel(App_t* app);
 
     // Display
     void app_show(App_t* app);

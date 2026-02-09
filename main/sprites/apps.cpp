@@ -4,6 +4,7 @@
 #include <cstring>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <mbedtls/sha256.h>
 
 #include "webp_player.h"
 #include "static_files.h"
@@ -265,4 +266,150 @@ void show_fs_sprite(const char* name) {
     // Use webp_player for embedded sprites
     // Embedded sprites loop forever until stopped or replaced
     webp_player_play_embedded(name, true);
+}
+
+//------------------------------------------------------------------------------
+// Chunked Transfer Management
+//------------------------------------------------------------------------------
+
+bool app_transfer_start(App_t* app, size_t total_size, uint32_t total_chunks, const uint8_t* expected_sha256) {
+    if (!app || !app->mutex || total_size == 0 || total_chunks == 0) return false;
+
+    MutexGuard lock(app->mutex);
+    if (!lock) return false;
+
+    // Cancel any existing transfer
+    if (app->transfer.active && app->transfer.buffer) {
+        heap_caps_free(app->transfer.buffer);
+    }
+
+    // Allocate buffer for incoming data
+    app->transfer.buffer = alloc_spiram(total_size);
+    if (!app->transfer.buffer) {
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes for transfer", total_size);
+        return false;
+    }
+
+    app->transfer.total_size = total_size;
+    app->transfer.total_chunks = total_chunks;
+    app->transfer.chunks_received = 0;
+    app->transfer.next_expected = 0;
+    app->transfer.active = true;
+
+    if (expected_sha256) {
+        std::memcpy(app->transfer.expected_sha256, expected_sha256, 32);
+    }
+
+    ESP_LOGI(TAG, "Transfer started: %zu bytes in %u chunks", total_size, total_chunks);
+    return true;
+}
+
+bool app_transfer_add_chunk(App_t* app, uint32_t chunk_index, const uint8_t* data, size_t len) {
+    if (!app || !app->mutex || !data || len == 0) return false;
+
+    MutexGuard lock(app->mutex);
+    if (!lock) return false;
+
+    if (!app->transfer.active || !app->transfer.buffer) {
+        ESP_LOGW(TAG, "No active transfer for chunk %u", chunk_index);
+        return false;
+    }
+
+    // Verify ordering (WebSocket guarantees order, but check anyway)
+    if (chunk_index != app->transfer.next_expected) {
+        ESP_LOGW(TAG, "Chunk %u out of order, expected %u", chunk_index, app->transfer.next_expected);
+        // Continue anyway - copy to correct position
+    }
+
+    // Calculate offset and copy data
+    size_t offset = static_cast<size_t>(chunk_index) * APP_TRANSFER_CHUNK_SIZE;
+    if (offset + len > app->transfer.total_size) {
+        ESP_LOGE(TAG, "Chunk %u overflows buffer (offset=%zu, len=%zu, total=%zu)",
+                 chunk_index, offset, len, app->transfer.total_size);
+        return false;
+    }
+
+    std::memcpy(app->transfer.buffer + offset, data, len);
+    app->transfer.chunks_received++;
+    app->transfer.next_expected = chunk_index + 1;
+
+    ESP_LOGD(TAG, "Chunk %u/%u received (%zu bytes)",
+             chunk_index + 1, app->transfer.total_chunks, len);
+
+    return true;
+}
+
+bool app_transfer_is_complete(App_t* app) {
+    if (!app || !app->mutex) return false;
+
+    MutexGuard lock(app->mutex);
+    if (!lock) return false;
+
+    return app->transfer.active &&
+           app->transfer.chunks_received == app->transfer.total_chunks;
+}
+
+bool app_transfer_finalize(App_t* app) {
+    if (!app || !app->mutex) return false;
+
+    MutexGuard lock(app->mutex);
+    if (!lock) return false;
+
+    if (!app->transfer.active || !app->transfer.buffer) {
+        ESP_LOGW(TAG, "No active transfer to finalize");
+        return false;
+    }
+
+    if (app->transfer.chunks_received != app->transfer.total_chunks) {
+        ESP_LOGE(TAG, "Transfer incomplete: %u/%u chunks",
+                 app->transfer.chunks_received, app->transfer.total_chunks);
+        return false;
+    }
+
+    // Verify SHA256
+    uint8_t computed_sha256[32];
+    mbedtls_sha256(app->transfer.buffer, app->transfer.total_size, computed_sha256, 0);
+
+    if (std::memcmp(computed_sha256, app->transfer.expected_sha256, 32) != 0) {
+        ESP_LOGE(TAG, "SHA256 mismatch, discarding transfer");
+        heap_caps_free(app->transfer.buffer);
+        app->transfer.buffer = nullptr;
+        app->transfer.active = false;
+        return false;
+    }
+
+    // Move buffer to app data
+    heap_caps_free(app->data);
+    app->data = app->transfer.buffer;
+    app->len = app->transfer.total_size;
+    std::memcpy(app->sha256, app->transfer.expected_sha256, 32);
+
+    // Clear transfer state (buffer now owned by app->data)
+    app->transfer.buffer = nullptr;
+    app->transfer.active = false;
+    app->transfer.total_size = 0;
+    app->transfer.total_chunks = 0;
+    app->transfer.chunks_received = 0;
+
+    ESP_LOGI(TAG, "Transfer finalized: %zu bytes, SHA256 verified", app->len);
+    return true;
+}
+
+void app_transfer_cancel(App_t* app) {
+    if (!app || !app->mutex) return;
+
+    MutexGuard lock(app->mutex);
+    if (!lock) return;
+
+    if (app->transfer.buffer) {
+        heap_caps_free(app->transfer.buffer);
+        app->transfer.buffer = nullptr;
+    }
+
+    app->transfer.active = false;
+    app->transfer.total_size = 0;
+    app->transfer.total_chunks = 0;
+    app->transfer.chunks_received = 0;
+
+    ESP_LOGI(TAG, "Transfer cancelled");
 }

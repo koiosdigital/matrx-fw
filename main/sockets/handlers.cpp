@@ -36,14 +36,52 @@ namespace {
             return;
         }
 
-        bool success = response->app_data.len > 0;
-        ESP_LOGI(TAG, "App render response (%zu bytes, success=%d)",
-            response->app_data.len, success);
+        // Chunked transfer: allocate buffer and wait for chunks
+        if (response->total_size == 0 || response->total_chunks == 0) {
+            ESP_LOGW(TAG, "Invalid render response: size=%u, chunks=%u",
+                     response->total_size, response->total_chunks);
+            scheduler_on_render_response(response->app_uuid.data, false);
+            return;
+        }
 
-        memcpy(app->sha256, response->data_sha256.data, sizeof(app->sha256));
+        ESP_LOGI(TAG, "App render response: %u bytes in %u chunks",
+                 response->total_size, response->total_chunks);
 
-        app_set_data(app, response->app_data.data, response->app_data.len);
-        scheduler_on_render_response(response->app_uuid.data, success);
+        if (!app_transfer_start(app, response->total_size, response->total_chunks,
+                                response->data_sha256.data)) {
+            ESP_LOGE(TAG, "Failed to start transfer");
+            scheduler_on_render_response(response->app_uuid.data, false);
+        }
+    }
+
+    void handle_app_data_chunk(Kd__V1__AppDataChunk* chunk) {
+        if (chunk == nullptr) return;
+        if (chunk->app_uuid.len != 16) {
+            ESP_LOGW(TAG, "Invalid chunk UUID length: %zu", chunk->app_uuid.len);
+            return;
+        }
+
+        App_t* app = app_find(chunk->app_uuid.data);
+        if (!app) {
+            ESP_LOGW(TAG, "App not found for chunk");
+            return;
+        }
+
+        if (!app_transfer_add_chunk(app, chunk->chunk_index, chunk->data.data, chunk->data.len)) {
+            ESP_LOGE(TAG, "Failed to add chunk %u", chunk->chunk_index);
+            app_transfer_cancel(app);
+            scheduler_on_render_response(app->uuid, false);
+            return;
+        }
+
+        // Check if transfer is complete
+        if (app_transfer_is_complete(app)) {
+            bool success = app_transfer_finalize(app);
+            scheduler_on_render_response(app->uuid, success);
+            if (success) {
+                ESP_LOGI(TAG, "App data transfer complete");
+            }
+        }
     }
 
     void handle_device_config(const Kd__V1__DeviceConfig* cfg) {
@@ -154,6 +192,9 @@ void handle_message(Kd__V1__MatrxMessage* message) {
         break;
     case KD__V1__MATRX_MESSAGE__MESSAGE_APP_RENDER_RESPONSE:
         handle_app_render_response(message->app_render_response);
+        break;
+    case KD__V1__MATRX_MESSAGE__MESSAGE_APP_DATA_CHUNK:
+        handle_app_data_chunk(message->app_data_chunk);
         break;
     case KD__V1__MATRX_MESSAGE__MESSAGE_DEVICE_CONFIG_REQUEST:
         msg_send_device_config();
