@@ -9,7 +9,7 @@
 #include <esp_log.h>
 #include <esp_event.h>
 #include <esp_wifi.h>
-#include <wifi_provisioning/manager.h>
+#include <network_provisioning/manager.h>
 #include <protocomm_ble.h>
 
 #include <kd_common.h>
@@ -18,20 +18,38 @@
 #include <cstring>
 
 #include "sockets.h"
+#include "hub75.h"
 
 static const char* TAG = "display";
 
 namespace {
 
-    // Timing constants
-    constexpr TickType_t BOOT_SPRITE_DELAY_MS = 1200;
-
-    // Display state
-    struct DisplayState {
-        MatrixPanel_I2S_DMA* dma_display = nullptr;
+    Hub75Config display_cfg = {
+        .panel_width = CONFIG_MATRIX_WIDTH,
+        .panel_height = CONFIG_MATRIX_HEIGHT,
+        .shift_driver = Hub75ShiftDriver::GENERIC,
+        .pins = {
+            .r1 = R1_PIN,
+            .g1 = G1_PIN,
+            .b1 = B1_PIN,
+            .r2 = R2_PIN,
+            .g2 = G2_PIN,
+            .b2 = B2_PIN,
+            .a = A_PIN,
+            .b = B_PIN,
+            .c = C_PIN,
+            .d = D_PIN,
+            .e = E_PIN,
+            .lat = LAT_PIN,
+            .oe = OE_PIN,
+            .clk = CLK_PIN
+        },
     };
 
-    DisplayState disp;
+    Hub75Driver dma_display(display_cfg);
+
+    // Timing constants
+    constexpr TickType_t BOOT_SPRITE_DELAY_MS = 1200;
 
     // Simple 5x7 monospaced font for digits 0-9
     constexpr uint8_t font_5x7[][7] = {
@@ -79,7 +97,7 @@ namespace {
     }
 
     void display_pop_code() {
-        char* pop_token = kd_common_provisioning_get_pop_token();
+        char* pop_token = kd_common_provisioning_get_srp_password();
         if (pop_token == nullptr) {
             ESP_LOGE(TAG, "POP token is null");
             return;
@@ -139,10 +157,10 @@ namespace {
     }
 
     void prov_event_handler(void*, esp_event_base_t, int32_t event_id, void*) {
-        if (event_id == WIFI_PROV_START) {
+        if (event_id == NETWORK_PROV_START) {
             webp_player_play_embedded("setup", true);
         }
-        else if (event_id == WIFI_PROV_END) {
+        else if (event_id == NETWORK_PROV_END) {
             // Don't show connecting if already connected to websocket
             if (sockets_is_connected()) return;
 
@@ -171,36 +189,16 @@ namespace {
 //------------------------------------------------------------------------------
 
 void display_init() {
-    HUB75_I2S_CFG::i2s_pins pins = {
-        .r1 = R1_PIN,
-        .g1 = G1_PIN,
-        .b1 = B1_PIN,
-        .r2 = R2_PIN,
-        .g2 = G2_PIN,
-        .b2 = B2_PIN,
-        .a = A_PIN,
-        .b = B_PIN,
-        .c = C_PIN,
-        .d = D_PIN,
-        .e = E_PIN,
-        .lat = LAT_PIN,
-        .oe = OE_PIN,
-        .clk = CLK_PIN
-    };
-
-    HUB75_I2S_CFG mxconfig(CONFIG_MATRIX_WIDTH, CONFIG_MATRIX_HEIGHT, 1, pins);
-
 #if DISPLAY_ENABLED
-    disp.dma_display = new MatrixPanel_I2S_DMA(mxconfig);
-    disp.dma_display->begin();
-    disp.dma_display->setBrightness(32);
-    disp.dma_display->fillScreenRGB888(0, 0, 0);
+    dma_display.begin();
+    dma_display.set_brightness(32);
+    dma_display.clear();
 #endif
 
     // Register event handlers for provisioning display states
     esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, ESP_EVENT_ANY_ID,
         ble_event_handler, nullptr);
-    esp_event_handler_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID,
+    esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID,
         prov_event_handler, nullptr);
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START,
         wifi_event_handler, nullptr);
@@ -210,12 +208,12 @@ void display_init() {
 
 void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height) {
 #if DISPLAY_ENABLED
-    if (!disp.dma_display || !rgba_frame) return;
+    if (!rgba_frame) return;
 
     int px = 0;
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-            disp.dma_display->drawPixelRGB888(x, y,
+            dma_display.set_pixel(x, y,
                 rgba_frame[px * 4],
                 rgba_frame[px * 4 + 1],
                 rgba_frame[px * 4 + 2]);
@@ -227,9 +225,7 @@ void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height)
 
 void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
 #if DISPLAY_ENABLED
-    if (!disp.dma_display) return;
-
-    disp.dma_display->fillScreen(0);
+    dma_display.clear();
 
     if (buffer_len != CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3) {
         return;
@@ -238,7 +234,7 @@ void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
     for (int y = 0; y < CONFIG_MATRIX_HEIGHT; y++) {
         for (int x = 0; x < CONFIG_MATRIX_WIDTH; x++) {
             int px = (y * CONFIG_MATRIX_WIDTH + x) * 3;
-            disp.dma_display->drawPixelRGB888(x, y,
+            dma_display.set_pixel(x, y,
                 rgb_buffer[px], rgb_buffer[px + 1], rgb_buffer[px + 2]);
         }
     }
@@ -247,17 +243,13 @@ void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
 
 void display_clear() {
 #if DISPLAY_ENABLED
-    if (disp.dma_display != nullptr) {
-        disp.dma_display->fillScreenRGB888(0, 0, 0);
-    }
+    dma_display.clear();
 #endif
 }
 
 void display_set_brightness(uint8_t brightness) {
 #if DISPLAY_ENABLED
-    if (disp.dma_display != nullptr) {
-        disp.dma_display->setBrightness(brightness);
-    }
+    dma_display.set_brightness(brightness);
 #else
     ESP_LOGW(TAG, "Display is not enabled, cannot set brightness");
 #endif

@@ -84,23 +84,16 @@ extern "C" void app_main(void)
         perform_factory_reset("button hold");
     }
 
-    kd_common_set_provisioning_pop_token_format(ProvisioningPOPTokenFormat_t::NUMERIC_6);
-
-    // Disable timezone fetch on boot - this app only needs UTC time
-    // These settings are applied before init and preserved through NVS load
-    kd_common_set_fetch_tz_on_boot(false);
-    kd_common_set_auto_timezone(false);
+    kd_common_set_provisioning_srp_password_format(ProvisioningSRPPasswordFormat_t::PROVISIONING_SRP_FORMAT_NUMERIC_6);
 
     // Show keygen sprite if key generation will occur
-#ifndef KD_COMMON_CRYPTO_DISABLE
+#ifdef CONFIG_KD_COMMON_ENABLE_CRYPTO
     if (kd_common_crypto_will_generate_key()) {
         show_fs_sprite("keygen");
     }
 #endif
 
     kd_common_init();
-
-    ESP_LOGI(TAG, "post kdc Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
 
     // Initialize app manager
     apps_init();
@@ -120,6 +113,5 @@ extern "C" void app_main(void)
 
     sockets_init();
 
-    ESP_LOGI(TAG, "post sockets Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
     vTaskDelete(nullptr);
 }
