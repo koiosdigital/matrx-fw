@@ -210,34 +210,22 @@ void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height)
 #if DISPLAY_ENABLED
     if (!rgba_frame) return;
 
-    int px = 0;
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            dma_display.set_pixel(x, y,
-                rgba_frame[px * 4],
-                rgba_frame[px * 4 + 1],
-                rgba_frame[px * 4 + 2]);
-            px++;
-        }
-    }
+    // Bulk transfer entire frame using RGB888_32 with BGR order (little-endian)
+    // RGBA layout [R,G,B,A] matches BGR little-endian which reads r=p[0], g=p[1], b=p[2]
+    dma_display.draw_pixels(0, 0, static_cast<uint16_t>(width), static_cast<uint16_t>(height),
+        rgba_frame, Hub75PixelFormat::RGB888_32, Hub75ColorOrder::BGR);
 #endif
 }
 
 void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
 #if DISPLAY_ENABLED
-    dma_display.clear();
-
     if (buffer_len != CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3) {
         return;
     }
 
-    for (int y = 0; y < CONFIG_MATRIX_HEIGHT; y++) {
-        for (int x = 0; x < CONFIG_MATRIX_WIDTH; x++) {
-            int px = (y * CONFIG_MATRIX_WIDTH + x) * 3;
-            dma_display.set_pixel(x, y,
-                rgb_buffer[px], rgb_buffer[px + 1], rgb_buffer[px + 2]);
-        }
-    }
+    // Bulk transfer entire buffer
+    dma_display.draw_pixels(0, 0, CONFIG_MATRIX_WIDTH, CONFIG_MATRIX_HEIGHT,
+        rgb_buffer, Hub75PixelFormat::RGB888);
 #endif
 }
 

@@ -26,7 +26,7 @@ extern "C" {
     /**
      * Render a decoded RGBA frame to the display.
      * Frame buffer must be RGBA8888 format (4 bytes per pixel).
-     * Applies status bar overlay if enabled.
+     * Uses bulk DMA transfer for optimal performance.
      *
      * @param rgba_frame Pointer to RGBA8888 frame buffer
      * @param width      Frame width in pixels

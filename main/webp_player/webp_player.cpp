@@ -208,7 +208,13 @@ namespace {
         player.webp_data.bytes = player.current.webp_bytes;
         player.webp_data.size = player.current.webp_size;
 
-        player.decoder = WebPAnimDecoderNew(&player.webp_data, nullptr);
+        // Configure decoder for RGBA output - compatible with hub75 RGB888_32 BGR little-endian format
+        // RGBA layout [R,G,B,A] matches BGR little-endian which reads r=p[0], g=p[1], b=p[2]
+        WebPAnimDecoderOptions dec_options;
+        WebPAnimDecoderOptionsInit(&dec_options);
+        dec_options.color_mode = MODE_RGBA;
+
+        player.decoder = WebPAnimDecoderNew(&player.webp_data, &dec_options);
         if (!player.decoder) {
             xSemaphoreGive(player.decoder_mutex);
             ESP_LOGE(TAG, "Failed to create decoder");
@@ -623,7 +629,7 @@ namespace {
         // Reset error count on successful decode
         player.decode_error_count = 0;
 
-        // Render frame
+        // Render frame (RGBA format, 4 bytes per pixel)
         display_render_rgba_frame(frame_buffer, CONFIG_MATRIX_WIDTH, CONFIG_MATRIX_HEIGHT);
 
         // Check if PREPARE_NEXT should be sent
