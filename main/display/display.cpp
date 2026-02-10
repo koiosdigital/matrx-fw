@@ -1,6 +1,6 @@
 // Display - Pure hardware layer for HUB75 LED matrix
 #include "display.h"
-#include "pinout.h"
+#include "sdkconfig.h"
 #include "webp_player.h"
 
 #include <freertos/FreeRTOS.h>
@@ -29,20 +29,20 @@ namespace {
         .panel_height = CONFIG_MATRIX_HEIGHT,
         .shift_driver = Hub75ShiftDriver::GENERIC,
         .pins = {
-            .r1 = R1_PIN,
-            .g1 = G1_PIN,
-            .b1 = B1_PIN,
-            .r2 = R2_PIN,
-            .g2 = G2_PIN,
-            .b2 = B2_PIN,
-            .a = A_PIN,
-            .b = B_PIN,
-            .c = C_PIN,
-            .d = D_PIN,
-            .e = E_PIN,
-            .lat = LAT_PIN,
-            .oe = OE_PIN,
-            .clk = CLK_PIN
+            .r1 = CONFIG_R1_PIN,
+            .g1 = CONFIG_G1_PIN,
+            .b1 = CONFIG_B1_PIN,
+            .r2 = CONFIG_R2_PIN,
+            .g2 = CONFIG_G2_PIN,
+            .b2 = CONFIG_B2_PIN,
+            .a = CONFIG_A_PIN,
+            .b = CONFIG_B_PIN,
+            .c = CONFIG_C_PIN,
+            .d = CONFIG_D_PIN,
+            .e = CONFIG_E_PIN,
+            .lat = CONFIG_LAT_PIN,
+            .oe = CONFIG_OE_PIN,
+            .clk = CONFIG_CLK_PIN
         },
     };
 
@@ -189,7 +189,7 @@ namespace {
 //------------------------------------------------------------------------------
 
 void display_init() {
-#if DISPLAY_ENABLED
+#if CONFIG_DISPLAY_ENABLED
     dma_display.begin();
     dma_display.set_brightness(32);
     dma_display.clear();
@@ -207,7 +207,7 @@ void display_init() {
 }
 
 void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height) {
-#if DISPLAY_ENABLED
+#if CONFIG_DISPLAY_ENABLED
     if (!rgba_frame) return;
 
     // Bulk transfer entire frame using RGB888_32 with BGR order (little-endian)
@@ -218,7 +218,7 @@ void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height)
 }
 
 void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
-#if DISPLAY_ENABLED
+#if CONFIG_DISPLAY_ENABLED
     if (buffer_len != CONFIG_MATRIX_WIDTH * CONFIG_MATRIX_HEIGHT * 3) {
         return;
     }
@@ -230,13 +230,13 @@ void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
 }
 
 void display_clear() {
-#if DISPLAY_ENABLED
+#if CONFIG_DISPLAY_ENABLED
     dma_display.clear();
 #endif
 }
 
 void display_set_brightness(uint8_t brightness) {
-#if DISPLAY_ENABLED
+#if CONFIG_DISPLAY_ENABLED
     dma_display.set_brightness(brightness);
 #else
     ESP_LOGW(TAG, "Display is not enabled, cannot set brightness");

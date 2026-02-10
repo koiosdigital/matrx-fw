@@ -9,4 +9,7 @@ void sockets_deinit();
 // Check if connected to server
 bool sockets_is_connected();
 
+// Flush outbox (send queued messages immediately)
+void sockets_flush_outbox();
+
 #define SOCKETS_URL "wss://device.api.koiosdigital.net"

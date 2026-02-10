@@ -1,4 +1,5 @@
 #include "messages.h"
+#include "sockets.h"
 
 #include <esp_log.h>
 #include <esp_heap_caps.h>
@@ -45,6 +46,7 @@ bool msg_queue(const Kd__V1__MatrxMessage* message) {
         free(buf);
         return false;
     }
+    sockets_flush_outbox();
     return true;
 }
 
@@ -201,22 +203,4 @@ void msg_send_schedule_request() {
     msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_SCHEDULE_REQUEST;
     msg.schedule_request = &req;
     msg_queue(&msg);
-}
-
-void msg_send_cert_renew_request(const char* csr, size_t csr_len) {
-    if (csr == nullptr || csr_len == 0) {
-        ESP_LOGE(TAG, "Invalid CSR");
-        return;
-    }
-
-    Kd__V1__CertRenewRequest req = KD__V1__CERT_RENEW_REQUEST__INIT;
-    req.csr.data = reinterpret_cast<uint8_t*>(const_cast<char*>(csr));
-    req.csr.len = csr_len;
-
-    Kd__V1__MatrxMessage msg = KD__V1__MATRX_MESSAGE__INIT;
-    msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RENEW_REQUEST;
-    msg.cert_renew_request = &req;
-
-    msg_queue(&msg);
-    ESP_LOGI(TAG, "Sent cert renew request");
 }

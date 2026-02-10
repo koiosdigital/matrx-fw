@@ -1,11 +1,9 @@
-// WebP Player - Event-driven animated WebP playback task
 #include "webp_player.h"
 #include "display.h"
 #include "static_files.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/queue.h>
 #include <freertos/semphr.h>
 
 #include <esp_log.h>
@@ -22,126 +20,31 @@ ESP_EVENT_DEFINE_BASE(WEBP_PLAYER_EVENTS);
 namespace {
 
     //------------------------------------------------------------------------------
+    // Notification Bits
+    //------------------------------------------------------------------------------
+
+    constexpr uint32_t NOTIFY_PLAY = (1 << 0);
+    constexpr uint32_t NOTIFY_STOP = (1 << 1);
+
+    //------------------------------------------------------------------------------
     // Player State
     //------------------------------------------------------------------------------
 
-    enum class PlayerState : uint8_t {
+    enum class State : uint8_t {
         IDLE,
         PLAYING,
-        PAUSED,
     };
 
     //------------------------------------------------------------------------------
-    // Command Types
+    // Pending Command (written by API, read by task)
     //------------------------------------------------------------------------------
 
-    enum class CommandType : uint8_t {
-        PLAY,
-        SET_NEXT,
-        STOP,
-        PAUSE,
-        RESUME,
-    };
-
-    struct PlayParams {
-        webp_source_type_t source_type;
-        App_t* ram_app;
-        const char* embedded_name;
-        uint32_t duration_ms;
-        bool immediate;
-    };
-
-    struct Command {
-        CommandType type;
-        PlayParams play;  // Valid for PLAY and SET_NEXT
-    };
-
-    //------------------------------------------------------------------------------
-    // Playback Info
-    //------------------------------------------------------------------------------
-
-    struct PlaybackInfo {
-        webp_source_type_t source_type = WEBP_SOURCE_RAM;
-        App_t* ram_app = nullptr;
-        const char* embedded_name = nullptr;
-
-        // WebP data (copied for RAM apps, direct for embedded)
-        uint8_t* webp_buffer = nullptr;     // Owned copy for RAM apps (reused across playbacks)
-        size_t webp_buffer_capacity = 0;    // Allocated size of webp_buffer
-        const uint8_t* webp_bytes = nullptr;
-        size_t webp_size = 0;               // Actual size of current WebP data
-
-        // Duration tracking
-        uint32_t requested_duration_ms = 0;
-        TickType_t playback_start_tick = 0;
-        uint32_t loops_completed = 0;
-
-        // Animation info
-        uint32_t frame_count = 0;
-        uint32_t loop_duration_ms = 0;
-
-        // Frame timing
-        int last_frame_timestamp = 0;
-        TickType_t frame_tick = 0;
-        TickType_t loop_start_tick = 0;
-
-        // Flags
-        bool prepare_next_sent = false;
-
-        void reset() {
-            source_type = WEBP_SOURCE_RAM;
-            ram_app = nullptr;
-            embedded_name = nullptr;
-            // DON'T free webp_buffer here - keep for reuse across playbacks
-            // Buffer is only freed in webp_player_deinit() or when resizing
-            webp_bytes = nullptr;
-            webp_size = 0;
-            // Keep webp_buffer and webp_buffer_capacity intact for reuse
-            requested_duration_ms = 0;
-            playback_start_tick = 0;
-            loops_completed = 0;
-            frame_count = 0;
-            loop_duration_ms = 0;
-            last_frame_timestamp = 0;
-            frame_tick = 0;
-            loop_start_tick = 0;
-            prepare_next_sent = false;
-        }
-
-        void free_buffer() {
-            if (webp_buffer) {
-                heap_caps_free(webp_buffer);
-                webp_buffer = nullptr;
-            }
-            webp_buffer_capacity = 0;
-        }
-    };
-
-    //------------------------------------------------------------------------------
-    // Queued Next App
-    //------------------------------------------------------------------------------
-
-    struct QueuedApp {
-        bool valid = false;
+    struct PendingCmd {
+        std::atomic<bool> valid{ false };
         webp_source_type_t source_type = WEBP_SOURCE_RAM;
         App_t* ram_app = nullptr;
         const char* embedded_name = nullptr;
         uint32_t duration_ms = 0;
-
-        void set(const PlayParams* params) {
-            valid = true;
-            source_type = params->source_type;
-            ram_app = params->ram_app;
-            embedded_name = params->embedded_name;
-            duration_ms = params->duration_ms;
-        }
-
-        void clear() {
-            valid = false;
-            ram_app = nullptr;
-            embedded_name = nullptr;
-            duration_ms = 0;
-        }
     };
 
     //------------------------------------------------------------------------------
@@ -150,34 +53,42 @@ namespace {
 
     struct PlayerContext {
         TaskHandle_t task = nullptr;
-        QueueHandle_t cmd_queue = nullptr;
         SemaphoreHandle_t decoder_mutex = nullptr;
 
-        std::atomic<PlayerState> state{ PlayerState::IDLE };
-        PlaybackInfo current;
-        QueuedApp next;
+        std::atomic<State> state{ State::IDLE };
+        PendingCmd pending;
 
-        // WebP decoder
+        // Current playback source info (for event payloads)
+        webp_source_type_t source_type = WEBP_SOURCE_RAM;
+        App_t* ram_app = nullptr;
+        const char* embedded_name = nullptr;
+
+        // WebP data
+        const uint8_t* webp_bytes = nullptr;
+        size_t webp_size = 0;
+        uint8_t* webp_buffer = nullptr;  // Owned copy for RAM apps only
+        webp_source_type_t loaded_source_type = WEBP_SOURCE_EMBEDDED;  // Track what's currently loaded
+
+        // Decoder
         WebPAnimDecoder* decoder = nullptr;
-        WebPAnimInfo anim_info = {};
         WebPData webp_data = { nullptr, 0 };
+        WebPAnimInfo anim_info = {};
+
+        // Timing
+        TickType_t playback_start = 0;
+        TickType_t next_frame_tick = 0;
+        uint32_t duration_ms = 0;
+        int last_timestamp = 0;
+        uint32_t frame_count = 0;
 
         // Error tracking
         int decode_error_count = 0;
-
-        // Display mode - when true, NEED_NEXT events are emitted
-        // Set by scheduler when sockets connect/disconnect
-        std::atomic<bool> display_mode{ false };
-
-        // NEED_NEXT tracking - emitted when RAM app is invalid
-        bool need_next_pending = false;
-        TickType_t last_need_next_tick = 0;
     };
 
-    PlayerContext player;
+    PlayerContext ctx;
 
     //------------------------------------------------------------------------------
-    // Helper: ticks to ms
+    // Helpers
     //------------------------------------------------------------------------------
 
     inline uint32_t ticks_to_ms(TickType_t ticks) {
@@ -189,54 +100,113 @@ namespace {
     //------------------------------------------------------------------------------
 
     void destroy_decoder() {
-        if (player.decoder) {
-            xSemaphoreTake(player.decoder_mutex, portMAX_DELAY);
-            WebPAnimDecoderDelete(player.decoder);
-            player.decoder = nullptr;
-            xSemaphoreGive(player.decoder_mutex);
+        if (ctx.decoder) {
+            xSemaphoreTake(ctx.decoder_mutex, portMAX_DELAY);
+            WebPAnimDecoderDelete(ctx.decoder);
+            ctx.decoder = nullptr;
+            xSemaphoreGive(ctx.decoder_mutex);
         }
     }
 
     esp_err_t create_decoder() {
         destroy_decoder();
 
-        if (!player.current.webp_bytes || player.current.webp_size == 0) {
+        if (!ctx.webp_bytes || ctx.webp_size == 0) {
             ESP_LOGE(TAG, "No WebP data");
             return ESP_ERR_INVALID_ARG;
         }
 
-        xSemaphoreTake(player.decoder_mutex, portMAX_DELAY);
+        xSemaphoreTake(ctx.decoder_mutex, portMAX_DELAY);
 
-        player.webp_data.bytes = player.current.webp_bytes;
-        player.webp_data.size = player.current.webp_size;
+        ctx.webp_data.bytes = ctx.webp_bytes;
+        ctx.webp_data.size = ctx.webp_size;
 
-        // Configure decoder for RGBA output - compatible with hub75 RGB888_32 BGR little-endian format
-        // RGBA layout [R,G,B,A] matches BGR little-endian which reads r=p[0], g=p[1], b=p[2]
+        // Configure decoder for RGBA output
         WebPAnimDecoderOptions dec_options;
         WebPAnimDecoderOptionsInit(&dec_options);
         dec_options.color_mode = MODE_RGBA;
+        ctx.decoder = WebPAnimDecoderNew(&ctx.webp_data, &dec_options);
 
-        player.decoder = WebPAnimDecoderNew(&player.webp_data, &dec_options);
-        if (!player.decoder) {
-            xSemaphoreGive(player.decoder_mutex);
+        if (!ctx.decoder) {
+            xSemaphoreGive(ctx.decoder_mutex);
             ESP_LOGE(TAG, "Failed to create decoder");
             return ESP_FAIL;
         }
 
-        if (!WebPAnimDecoderGetInfo(player.decoder, &player.anim_info)) {
-            WebPAnimDecoderDelete(player.decoder);
-            player.decoder = nullptr;
-            xSemaphoreGive(player.decoder_mutex);
+        if (!WebPAnimDecoderGetInfo(ctx.decoder, &ctx.anim_info)) {
+            WebPAnimDecoderDelete(ctx.decoder);
+            ctx.decoder = nullptr;
+            xSemaphoreGive(ctx.decoder_mutex);
             ESP_LOGE(TAG, "Failed to get anim info");
             return ESP_FAIL;
         }
 
-        player.current.frame_count = player.anim_info.frame_count;
-        // loop_duration_ms will be measured after first loop completes
+        ctx.frame_count = ctx.anim_info.frame_count;
+        xSemaphoreGive(ctx.decoder_mutex);
 
-        xSemaphoreGive(player.decoder_mutex);
+        ESP_LOGI(TAG, "Decoder created: %u frames, %ux%u",
+            ctx.frame_count, ctx.anim_info.canvas_width, ctx.anim_info.canvas_height);
+        return ESP_OK;
+    }
 
-        ESP_LOGI(TAG, "Decoder created: %u frames", player.current.frame_count);
+    //------------------------------------------------------------------------------
+    // Content Loading
+    //------------------------------------------------------------------------------
+
+    void free_buffer() {
+        // Only free if we own the buffer (RAM content, not embedded flash)
+        if (ctx.loaded_source_type == WEBP_SOURCE_RAM && ctx.webp_buffer) {
+            heap_caps_free(ctx.webp_buffer);
+            ctx.webp_buffer = nullptr;
+        }
+        ctx.webp_bytes = nullptr;
+        ctx.webp_size = 0;
+        ctx.loaded_source_type = WEBP_SOURCE_EMBEDDED;  // Reset to safe default
+    }
+
+    esp_err_t load_content() {
+        free_buffer();
+
+        if (ctx.source_type == WEBP_SOURCE_EMBEDDED) {
+            // Embedded: direct pointer to flash (we don't own this memory)
+            const uint8_t* data = nullptr;
+            size_t len = 0;
+
+            if (get_image_data(ctx.embedded_name, &data, &len) == 0 || !data || len == 0) {
+                ESP_LOGE(TAG, "Embedded sprite not found: %s", ctx.embedded_name);
+                return ESP_ERR_NOT_FOUND;
+            }
+
+            ctx.webp_bytes = data;
+            ctx.webp_size = len;
+            ctx.loaded_source_type = WEBP_SOURCE_EMBEDDED;
+            ESP_LOGI(TAG, "Loaded embedded sprite: %s (%zu bytes)", ctx.embedded_name, len);
+        }
+        else {
+            // RAM: copy to owned buffer (we own this memory)
+            if (!ctx.ram_app || !ctx.ram_app->data || ctx.ram_app->len == 0) {
+                ESP_LOGE(TAG, "Invalid RAM app");
+                return ESP_ERR_INVALID_ARG;
+            }
+
+            ctx.webp_buffer = static_cast<uint8_t*>(
+                heap_caps_malloc(ctx.ram_app->len, MALLOC_CAP_SPIRAM));
+            if (!ctx.webp_buffer) {
+                ESP_LOGE(TAG, "Failed to alloc %zu bytes", ctx.ram_app->len);
+                return ESP_ERR_NO_MEM;
+            }
+
+            // Lock app mutex during copy
+            xSemaphoreTake(ctx.ram_app->mutex, portMAX_DELAY);
+            std::memcpy(ctx.webp_buffer, ctx.ram_app->data, ctx.ram_app->len);
+            ctx.webp_size = ctx.ram_app->len;
+            xSemaphoreGive(ctx.ram_app->mutex);
+
+            ctx.webp_bytes = ctx.webp_buffer;
+            ctx.loaded_source_type = WEBP_SOURCE_RAM;
+            ESP_LOGI(TAG, "Loaded RAM app (%zu bytes)", ctx.webp_size);
+        }
+
         return ESP_OK;
     }
 
@@ -246,12 +216,11 @@ namespace {
 
     void emit_playing_event() {
         webp_player_playing_evt_t evt = {};
-        evt.source_type = player.current.source_type;
-        evt.ram_app = player.current.ram_app;
-        evt.embedded_name = player.current.embedded_name;
-        evt.expected_duration_ms = player.current.requested_duration_ms;
-        evt.loop_duration_ms = player.current.loop_duration_ms;
-        evt.frame_count = player.current.frame_count;
+        evt.source_type = ctx.source_type;
+        evt.ram_app = ctx.ram_app;
+        evt.embedded_name = ctx.embedded_name;
+        evt.duration_ms = ctx.duration_ms;
+        evt.frame_count = ctx.frame_count;
 
         esp_event_post(WEBP_PLAYER_EVENTS, WEBP_PLAYER_EVT_PLAYING,
             &evt, sizeof(evt), 0);
@@ -259,23 +228,12 @@ namespace {
 
     void emit_error_event(int error_code) {
         webp_player_error_evt_t evt = {};
-        evt.source_type = player.current.source_type;
-        evt.ram_app = player.current.ram_app;
-        evt.embedded_name = player.current.embedded_name;
+        evt.source_type = ctx.source_type;
+        evt.ram_app = ctx.ram_app;
+        evt.embedded_name = ctx.embedded_name;
         evt.error_code = error_code;
 
         esp_event_post(WEBP_PLAYER_EVENTS, WEBP_PLAYER_EVT_ERROR,
-            &evt, sizeof(evt), 0);
-    }
-
-    void emit_prepare_next_event(uint32_t remaining_ms) {
-        webp_player_prepare_next_evt_t evt = {};
-        evt.source_type = player.current.source_type;
-        evt.ram_app = player.current.ram_app;
-        evt.embedded_name = player.current.embedded_name;
-        evt.remaining_ms = remaining_ms;
-
-        esp_event_post(WEBP_PLAYER_EVENTS, WEBP_PLAYER_EVT_PREPARE_NEXT,
             &evt, sizeof(evt), 0);
     }
 
@@ -284,374 +242,218 @@ namespace {
             nullptr, 0, 0);
     }
 
-    void emit_need_next_event() {
-        esp_event_post(WEBP_PLAYER_EVENTS, WEBP_PLAYER_EVT_NEED_NEXT,
-            nullptr, 0, 0);
+    //------------------------------------------------------------------------------
+    // State Transitions
+    //------------------------------------------------------------------------------
+
+    void goto_idle() {
+        destroy_decoder();
+        free_buffer();
+        ctx.ram_app = nullptr;
+        ctx.embedded_name = nullptr;
+        ctx.state.store(State::IDLE);
     }
 
-    //------------------------------------------------------------------------------
-    // Duration Logic
-    //------------------------------------------------------------------------------
+    esp_err_t start_playback() {
+        ctx.decode_error_count = 0;
 
-    bool should_continue_playing() {
-        // Embedded sprites loop forever
-        if (player.current.source_type == WEBP_SOURCE_EMBEDDED) {
-            return true;
-        }
-
-        // Unlimited duration
-        if (player.current.requested_duration_ms == 0) {
-            return true;
-        }
-
-        uint32_t elapsed = ticks_to_ms(xTaskGetTickCount() - player.current.playback_start_tick);
-
-        // Animated or static: keep playing until display_time is reached
-        // This naturally handles looping - after each loop completes,
-        // check if we should start another one
-        return elapsed < player.current.requested_duration_ms;
-    }
-
-    void check_prepare_next() {
-        // Don't emit for embedded (loops forever)
-        if (player.current.source_type == WEBP_SOURCE_EMBEDDED) {
-            return;
-        }
-
-        // Already sent
-        if (player.current.prepare_next_sent) {
-            return;
-        }
-
-        // Unlimited duration
-        if (player.current.requested_duration_ms == 0) {
-            return;
-        }
-
-        uint32_t elapsed = ticks_to_ms(xTaskGetTickCount() - player.current.playback_start_tick);
-        uint32_t remaining = 0;
-
-        if (elapsed < player.current.requested_duration_ms) {
-            remaining = player.current.requested_duration_ms - elapsed;
-        }
-
-        if (remaining <= WEBP_PLAYER_PREPARE_NEXT_MS) {
-            emit_prepare_next_event(remaining);
-            player.current.prepare_next_sent = true;
-            ESP_LOGI(TAG, "PREPARE_NEXT emitted, %u ms remaining", remaining);
-        }
-    }
-
-    //------------------------------------------------------------------------------
-    // Playback Start
-    //------------------------------------------------------------------------------
-
-    esp_err_t start_playback(const PlayParams* params) {
-        player.current.reset();
-        player.decode_error_count = 0;
-
-        player.current.source_type = params->source_type;
-        player.current.requested_duration_ms = params->duration_ms;
-
-        if (params->source_type == WEBP_SOURCE_RAM) {
-            player.current.ram_app = params->ram_app;
-            if (!params->ram_app || !params->ram_app->data || params->ram_app->len == 0) {
-                ESP_LOGE(TAG, "Invalid RAM app");
-                return ESP_ERR_INVALID_ARG;
-            }
-
-            size_t needed_size = params->ram_app->len;
-
-            // Reuse existing buffer if it fits, otherwise resize
-            if (player.current.webp_buffer == nullptr || player.current.webp_buffer_capacity < needed_size) {
-                // Need larger buffer - free old and allocate new
-                if (player.current.webp_buffer) {
-                    heap_caps_free(player.current.webp_buffer);
-                }
-                player.current.webp_buffer = static_cast<uint8_t*>(
-                    heap_caps_malloc(needed_size, MALLOC_CAP_SPIRAM));
-                if (!player.current.webp_buffer) {
-                    ESP_LOGE(TAG, "Failed to alloc %zu bytes", needed_size);
-                    player.current.webp_buffer_capacity = 0;
-                    return ESP_ERR_NO_MEM;
-                }
-                player.current.webp_buffer_capacity = needed_size;
-            }
-            // else: reuse existing buffer (it's large enough)
-
-            // Lock app and copy
-            xSemaphoreTake(params->ram_app->mutex, portMAX_DELAY);
-            std::memcpy(player.current.webp_buffer, params->ram_app->data, needed_size);
-            player.current.webp_size = needed_size;
-            xSemaphoreGive(params->ram_app->mutex);
-
-            player.current.webp_bytes = player.current.webp_buffer;
-        }
-        else {
-            player.current.embedded_name = params->embedded_name;
-            const uint8_t* data = nullptr;
-            size_t len = 0;
-
-            if (get_image_data(params->embedded_name, &data, &len) == 0 || !data || len == 0) {
-                ESP_LOGE(TAG, "Embedded sprite not found: %s", params->embedded_name);
-                return ESP_ERR_NOT_FOUND;
-            }
-
-            player.current.webp_bytes = data;
-            player.current.webp_size = len;
-            // Embedded sprites have unlimited duration (loop forever)
-            player.current.requested_duration_ms = 0;
-        }
-
-        esp_err_t err = create_decoder();
+        esp_err_t err = load_content();
         if (err != ESP_OK) {
-            player.current.reset();
             return err;
         }
 
-        player.current.playback_start_tick = xTaskGetTickCount();
-        player.current.frame_tick = player.current.playback_start_tick;
-        player.current.loop_start_tick = player.current.playback_start_tick;
-        player.state.store(PlayerState::PLAYING);
+        err = create_decoder();
+        if (err != ESP_OK) {
+            free_buffer();
+            return err;
+        }
+
+        ctx.playback_start = xTaskGetTickCount();
+        ctx.next_frame_tick = ctx.playback_start;
+        ctx.last_timestamp = 0;
+        ctx.state.store(State::PLAYING);
 
         emit_playing_event();
         ESP_LOGI(TAG, "Playback started: %s, duration %u ms",
-            params->source_type == WEBP_SOURCE_RAM ? "RAM app" : params->embedded_name,
-            player.current.requested_duration_ms);
+            ctx.source_type == WEBP_SOURCE_RAM ? "RAM app" : ctx.embedded_name,
+            ctx.duration_ms);
 
         return ESP_OK;
     }
 
     //------------------------------------------------------------------------------
-    // Transition to Next or Idle
+    // Duration Check
     //------------------------------------------------------------------------------
 
-    void transition_to_next_or_idle() {
-        destroy_decoder();
-        player.current.reset();
-
-        if (player.next.valid) {
-            PlayParams params = {};
-            params.source_type = player.next.source_type;
-            params.ram_app = player.next.ram_app;
-            params.embedded_name = player.next.embedded_name;
-            params.duration_ms = player.next.duration_ms;
-            params.immediate = true;
-
-            player.next.clear();
-
-            if (start_playback(&params) == ESP_OK) {
-                return;
-            }
-            // Fall through to IDLE if start failed
+    bool check_duration_expired() {
+        // Embedded sprites loop forever
+        if (ctx.source_type == WEBP_SOURCE_EMBEDDED) {
+            return false;
         }
 
-        player.state.store(PlayerState::IDLE);
-        // Don't clear display - keep last frame visible until next content is ready
-        emit_stopped_event();
-        ESP_LOGI(TAG, "Playback stopped, going idle");
+        // Unlimited duration
+        if (ctx.duration_ms == 0) {
+            return false;
+        }
+
+        uint32_t elapsed = ticks_to_ms(xTaskGetTickCount() - ctx.playback_start);
+        return elapsed >= ctx.duration_ms;
     }
 
     //------------------------------------------------------------------------------
-    // Handle Decode Error
+    // Command Handling
+    //------------------------------------------------------------------------------
+
+    void handle_pending_command() {
+        // Check for stop first
+        // (stop is indicated by notify without valid pending)
+        if (!ctx.pending.valid.load(std::memory_order_acquire)) {
+            // Stop command
+            if (ctx.state.load() == State::PLAYING) {
+                goto_idle();
+                emit_stopped_event();
+                ESP_LOGI(TAG, "Stopped by command");
+            }
+            return;
+        }
+
+        // Play command - copy pending data
+        ctx.source_type = ctx.pending.source_type;
+        ctx.ram_app = ctx.pending.ram_app;
+        ctx.embedded_name = ctx.pending.embedded_name;
+        ctx.duration_ms = ctx.pending.duration_ms;
+        ctx.pending.valid.store(false, std::memory_order_release);
+
+        // Stop current if playing
+        if (ctx.state.load() == State::PLAYING) {
+            destroy_decoder();
+            free_buffer();
+        }
+
+        // Start new playback
+        esp_err_t err = start_playback();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "start_playback failed: %s", esp_err_to_name(err));
+            emit_error_event(err);
+            goto_idle();
+        }
+    }
+
+    //------------------------------------------------------------------------------
+    // Decode Error Handling
     //------------------------------------------------------------------------------
 
     void handle_decode_error() {
-        player.decode_error_count++;
-        ESP_LOGW(TAG, "Decode error %d/%d", player.decode_error_count, WEBP_PLAYER_RETRY_COUNT);
+        ctx.decode_error_count++;
+        ESP_LOGW(TAG, "Decode error %d/%d", ctx.decode_error_count, WEBP_PLAYER_RETRY_COUNT);
 
-        if (player.decode_error_count >= WEBP_PLAYER_RETRY_COUNT) {
-            ESP_LOGE(TAG, "Max retries reached, giving up");
+        if (ctx.decode_error_count >= WEBP_PLAYER_RETRY_COUNT) {
+            ESP_LOGE(TAG, "Max retries reached");
             emit_error_event(ESP_FAIL);
-            transition_to_next_or_idle();
+            display_clear();
+            goto_idle();
             return;
         }
 
         // Retry: recreate decoder
         vTaskDelay(pdMS_TO_TICKS(WEBP_PLAYER_RETRY_DELAY_MS));
         if (create_decoder() != ESP_OK) {
-            player.decode_error_count = WEBP_PLAYER_RETRY_COUNT;  // Force failure
+            ctx.decode_error_count = WEBP_PLAYER_RETRY_COUNT;
             handle_decode_error();
         }
     }
 
     //------------------------------------------------------------------------------
-    // Command Handlers
+    // Frame Decode and Render
+    // Returns frame delay in ms, or -1 on error
     //------------------------------------------------------------------------------
 
-    void handle_play_command(const PlayParams* params) {
-        PlayerState current_state = player.state.load();
+    int decode_and_render_frame() {
+        // Note: Heap checks removed from hot path - they cause race conditions
+        // with kd_common_init running on the other core
 
-        ESP_LOGI(TAG, "Play command: source=%s, immediate=%d, state=%d",
-            params->source_type == WEBP_SOURCE_RAM ? "RAM" : "embedded",
-            params->immediate, static_cast<int>(current_state));
-
-        if (params->immediate || current_state == PlayerState::IDLE) {
-            // Stop current and start new
-            destroy_decoder();
-            player.current.reset();
-            player.next.clear();
-
-            esp_err_t err = start_playback(params);
-            if (err == ESP_OK) {
-                // Success - clear need_next state
-                player.need_next_pending = false;
-                ESP_LOGI(TAG, "Playback started successfully");
-            }
-            else {
-                ESP_LOGE(TAG, "start_playback failed: %s", esp_err_to_name(err));
-                player.state.store(PlayerState::IDLE);
-                display_clear();
-                // If this was a RAM app that failed and we're in display mode, request next
-                if (params->source_type == WEBP_SOURCE_RAM && player.display_mode.load()) {
-                    player.need_next_pending = true;
-                    player.last_need_next_tick = xTaskGetTickCount();
-                    emit_need_next_event();
-                    ESP_LOGI(TAG, "Need next app (invalid RAM app)");
-                }
-            }
-        }
-        else {
-            // Queue as next
-            player.next.set(params);
-            ESP_LOGI(TAG, "Queued next app (player busy)");
-        }
-    }
-
-    void handle_set_next_command(const PlayParams* params) {
-        player.next.set(params);
-        ESP_LOGI(TAG, "Set next app");
-    }
-
-    void handle_stop_command() {
-        destroy_decoder();
-        player.current.reset();
-        player.next.clear();
-        player.state.store(PlayerState::IDLE);
-        display_clear();
-        emit_stopped_event();
-        ESP_LOGI(TAG, "Stopped");
-    }
-
-    void handle_pause_command() {
-        if (player.state.load() == PlayerState::PLAYING) {
-            player.state.store(PlayerState::PAUSED);
-            ESP_LOGI(TAG, "Paused");
-        }
-    }
-
-    void handle_resume_command() {
-        if (player.state.load() == PlayerState::PAUSED) {
-            player.current.frame_tick = xTaskGetTickCount();
-            player.state.store(PlayerState::PLAYING);
-            ESP_LOGI(TAG, "Resumed");
-        }
-    }
-
-    void process_commands() {
-        Command cmd;
-        while (xQueueReceive(player.cmd_queue, &cmd, 0) == pdTRUE) {
-            switch (cmd.type) {
-            case CommandType::PLAY:
-                handle_play_command(&cmd.play);
-                break;
-            case CommandType::SET_NEXT:
-                handle_set_next_command(&cmd.play);
-                break;
-            case CommandType::STOP:
-                handle_stop_command();
-                break;
-            case CommandType::PAUSE:
-                handle_pause_command();
-                break;
-            case CommandType::RESUME:
-                handle_resume_command();
-                break;
-            }
-        }
-    }
-
-    //------------------------------------------------------------------------------
-    // Playback Iteration
-    //------------------------------------------------------------------------------
-
-    void playback_iteration() {
-        if (!xSemaphoreTake(player.decoder_mutex, pdMS_TO_TICKS(50))) {
-            return;
+        if (!xSemaphoreTake(ctx.decoder_mutex, pdMS_TO_TICKS(50))) {
+            return 0;  // Busy, try again next iteration
         }
 
-        if (!player.decoder) {
-            xSemaphoreGive(player.decoder_mutex);
-            return;
+        if (!ctx.decoder) {
+            xSemaphoreGive(ctx.decoder_mutex);
+            return -1;
         }
 
         // Check for loop completion
-        if (!WebPAnimDecoderHasMoreFrames(player.decoder)) {
-            // Measure loop duration after first loop completes
-            if (player.current.loops_completed == 0) {
-                TickType_t now = xTaskGetTickCount();
-                player.current.loop_duration_ms = ticks_to_ms(now - player.current.loop_start_tick);
-            }
-
-            player.current.loops_completed++;
-
-            if (!should_continue_playing()) {
-                xSemaphoreGive(player.decoder_mutex);
-                transition_to_next_or_idle();
-                return;
-            }
-
-            WebPAnimDecoderReset(player.decoder);
-            player.current.last_frame_timestamp = 0;
-            player.current.loop_start_tick = xTaskGetTickCount();
+        if (!WebPAnimDecoderHasMoreFrames(ctx.decoder)) {
+            WebPAnimDecoderReset(ctx.decoder);
+            ctx.last_timestamp = 0;
         }
 
         // Get next frame
         uint8_t* frame_buffer = nullptr;
         int timestamp = 0;
 
-        if (!WebPAnimDecoderGetNext(player.decoder, &frame_buffer, &timestamp)) {
-            xSemaphoreGive(player.decoder_mutex);
-            handle_decode_error();
-            return;
+        if (!WebPAnimDecoderGetNext(ctx.decoder, &frame_buffer, &timestamp)) {
+            xSemaphoreGive(ctx.decoder_mutex);
+            return -1;
         }
 
-        xSemaphoreGive(player.decoder_mutex);
+        xSemaphoreGive(ctx.decoder_mutex);
 
         if (!frame_buffer) {
-            handle_decode_error();
-            return;
+            return -1;
         }
 
         // Reset error count on successful decode
-        player.decode_error_count = 0;
+        ctx.decode_error_count = 0;
 
-        // Render frame (RGBA format, 4 bytes per pixel)
-        display_render_rgba_frame(frame_buffer, player.anim_info.canvas_width, player.anim_info.canvas_height);
-
-        // Check if PREPARE_NEXT should be sent
-        check_prepare_next();
+        // Render frame
+        display_render_rgba_frame(frame_buffer,
+            ctx.anim_info.canvas_width,
+            ctx.anim_info.canvas_height);
 
         // Calculate delay
-        int delay_ms = timestamp - player.current.last_frame_timestamp;
-        player.current.last_frame_timestamp = timestamp;
+        int delay_ms = timestamp - ctx.last_timestamp;
+        ctx.last_timestamp = timestamp;
 
-        // Static images: hold for the remaining display time
-        if (player.current.frame_count == 1) {
-            uint32_t elapsed = ticks_to_ms(xTaskGetTickCount() - player.current.playback_start_tick);
-            if (player.current.requested_duration_ms > 0 && elapsed < player.current.requested_duration_ms) {
-                // Sleep for remaining time (capped to avoid overflow)
-                uint32_t remaining = player.current.requested_duration_ms - elapsed;
-                delay_ms = static_cast<int>(remaining > 60000 ? 60000 : remaining);
+        // Static images: hold for remaining display time
+        if (ctx.frame_count == 1) {
+            if (ctx.duration_ms > 0) {
+                uint32_t elapsed = ticks_to_ms(xTaskGetTickCount() - ctx.playback_start);
+                if (elapsed < ctx.duration_ms) {
+                    uint32_t remaining = ctx.duration_ms - elapsed;
+                    delay_ms = static_cast<int>(remaining > 60000 ? 60000 : remaining);
+                }
+                else {
+                    delay_ms = 0;  // Expired
+                }
             }
             else {
-                delay_ms = 100;  // Default for unlimited duration
+                delay_ms = 100;  // Unlimited duration static image
             }
         }
 
-        if (delay_ms > 0) {
-            vTaskDelayUntil(&player.current.frame_tick, pdMS_TO_TICKS(delay_ms));
+        return delay_ms;
+    }
+
+    //------------------------------------------------------------------------------
+    // Calculate Wait Ticks (maintains timing accuracy)
+    //------------------------------------------------------------------------------
+
+    TickType_t calculate_wait_ticks(int delay_ms) {
+        if (delay_ms <= 0) {
+            return 0;
         }
+
+        TickType_t target_tick = ctx.next_frame_tick + pdMS_TO_TICKS(delay_ms);
+        TickType_t now = xTaskGetTickCount();
+
+        // If we're behind, don't wait
+        if (now >= target_tick) {
+            ctx.next_frame_tick = now;
+            return 0;
+        }
+
+        ctx.next_frame_tick = target_tick;
+        return target_tick - now;
     }
 
     //------------------------------------------------------------------------------
@@ -662,52 +464,40 @@ namespace {
         ESP_LOGI(TAG, "Player task started");
 
         while (true) {
-            // Process any pending commands
-            process_commands();
+            State state = ctx.state.load();
 
-            PlayerState state = player.state.load();
+            if (state == State::IDLE) {
+                // Block until play command
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+                handle_pending_command();
+                continue;
+            }
 
-            switch (state) {
-            case PlayerState::IDLE:
-                // Check if we need to emit NEED_NEXT periodically (only in display mode)
-                if (player.need_next_pending && player.display_mode.load()) {
-                    TickType_t now = xTaskGetTickCount();
-                    if ((now - player.last_need_next_tick) >= pdMS_TO_TICKS(WEBP_PLAYER_NEED_NEXT_MS)) {
-                        emit_need_next_event();
-                        player.last_need_next_tick = now;
-                        ESP_LOGD(TAG, "Need next app (periodic)");
-                    }
-                }
-                vTaskDelay(pdMS_TO_TICKS(50));
-                break;
+            // PLAYING state
 
-            case PlayerState::PLAYING:
-                playback_iteration();
-                break;
+            // Check if duration expired
+            if (check_duration_expired()) {
+                emit_stopped_event();
+                goto_idle();
+                ESP_LOGI(TAG, "Duration expired");
+                continue;
+            }
 
-            case PlayerState::PAUSED:
-                // Just process commands, don't render
-                vTaskDelay(pdMS_TO_TICKS(50));
-                break;
+            // Decode and render frame
+            int delay_ms = decode_and_render_frame();
+            if (delay_ms < 0) {
+                handle_decode_error();
+                continue;
+            }
+
+            // Wait for frame delay OR notification
+            TickType_t wait_ticks = calculate_wait_ticks(delay_ms);
+            uint32_t notified = ulTaskNotifyTake(pdTRUE, wait_ticks);
+
+            if (notified) {
+                handle_pending_command();
             }
         }
-    }
-
-    //------------------------------------------------------------------------------
-    // Command Queue Helpers
-    //------------------------------------------------------------------------------
-
-    esp_err_t send_command(const Command* cmd) {
-        if (!player.cmd_queue) {
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        if (xQueueSend(player.cmd_queue, cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
-            ESP_LOGW(TAG, "Command queue full");
-            return ESP_ERR_TIMEOUT;
-        }
-
-        return ESP_OK;
     }
 
 }  // namespace
@@ -717,21 +507,13 @@ namespace {
 //------------------------------------------------------------------------------
 
 esp_err_t webp_player_init() {
-    if (player.task) {
+    if (ctx.task) {
         ESP_LOGW(TAG, "Already initialized");
         return ESP_OK;
     }
 
-    player.cmd_queue = xQueueCreate(WEBP_PLAYER_CMD_QUEUE_SIZE, sizeof(Command));
-    if (!player.cmd_queue) {
-        ESP_LOGE(TAG, "Failed to create command queue");
-        return ESP_ERR_NO_MEM;
-    }
-
-    player.decoder_mutex = xSemaphoreCreateMutex();
-    if (!player.decoder_mutex) {
-        vQueueDelete(player.cmd_queue);
-        player.cmd_queue = nullptr;
+    ctx.decoder_mutex = xSemaphoreCreateMutex();
+    if (!ctx.decoder_mutex) {
         ESP_LOGE(TAG, "Failed to create decoder mutex");
         return ESP_ERR_NO_MEM;
     }
@@ -742,15 +524,13 @@ esp_err_t webp_player_init() {
         WEBP_PLAYER_TASK_STACK_SIZE,
         nullptr,
         WEBP_PLAYER_TASK_PRIORITY,
-        &player.task,
+        &ctx.task,
         WEBP_PLAYER_TASK_CORE
     );
 
     if (ret != pdPASS) {
-        vSemaphoreDelete(player.decoder_mutex);
-        vQueueDelete(player.cmd_queue);
-        player.decoder_mutex = nullptr;
-        player.cmd_queue = nullptr;
+        vSemaphoreDelete(ctx.decoder_mutex);
+        ctx.decoder_mutex = nullptr;
         ESP_LOGE(TAG, "Failed to create player task");
         return ESP_FAIL;
     }
@@ -760,116 +540,73 @@ esp_err_t webp_player_init() {
 }
 
 void webp_player_deinit() {
-    if (player.task) {
-        vTaskDelete(player.task);
-        player.task = nullptr;
+    if (ctx.task) {
+        vTaskDelete(ctx.task);
+        ctx.task = nullptr;
     }
 
     destroy_decoder();
-    player.current.reset();
-    player.current.free_buffer();  // Free the persistent buffer on deinit
-    player.next.clear();
+    free_buffer();
 
-    if (player.decoder_mutex) {
-        vSemaphoreDelete(player.decoder_mutex);
-        player.decoder_mutex = nullptr;
+    if (ctx.decoder_mutex) {
+        vSemaphoreDelete(ctx.decoder_mutex);
+        ctx.decoder_mutex = nullptr;
     }
 
-    if (player.cmd_queue) {
-        vQueueDelete(player.cmd_queue);
-        player.cmd_queue = nullptr;
-    }
-
-    player.state.store(PlayerState::IDLE);
+    ctx.state.store(State::IDLE);
     ESP_LOGI(TAG, "WebP player deinitialized");
 }
 
 esp_err_t webp_player_play_app(App_t* app, uint32_t duration_ms, bool immediate) {
-    Command cmd = {};
-    cmd.type = CommandType::PLAY;
-    cmd.play.source_type = WEBP_SOURCE_RAM;
-    cmd.play.ram_app = app;
-    cmd.play.embedded_name = nullptr;
-    cmd.play.duration_ms = duration_ms;
-    cmd.play.immediate = immediate;
+    if (!ctx.task) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
-    return send_command(&cmd);
+    // Store pending command
+    ctx.pending.source_type = WEBP_SOURCE_RAM;
+    ctx.pending.ram_app = app;
+    ctx.pending.embedded_name = nullptr;
+    ctx.pending.duration_ms = duration_ms;
+    ctx.pending.valid.store(true, std::memory_order_release);
+
+    // Notify task
+    xTaskNotify(ctx.task, NOTIFY_PLAY, eSetBits);
+
+    return ESP_OK;
 }
 
 esp_err_t webp_player_play_embedded(const char* name, bool immediate) {
-    Command cmd = {};
-    cmd.type = CommandType::PLAY;
-    cmd.play.source_type = WEBP_SOURCE_EMBEDDED;
-    cmd.play.ram_app = nullptr;
-    cmd.play.embedded_name = name;
-    cmd.play.duration_ms = 0;  // Embedded always loops forever
-    cmd.play.immediate = immediate;
+    if (!ctx.task) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
-    return send_command(&cmd);
-}
+    // Store pending command
+    ctx.pending.source_type = WEBP_SOURCE_EMBEDDED;
+    ctx.pending.ram_app = nullptr;
+    ctx.pending.embedded_name = name;
+    ctx.pending.duration_ms = 0;  // Embedded loops forever
+    ctx.pending.valid.store(true, std::memory_order_release);
 
-esp_err_t webp_player_set_next_app(App_t* app, uint32_t duration_ms) {
-    Command cmd = {};
-    cmd.type = CommandType::SET_NEXT;
-    cmd.play.source_type = WEBP_SOURCE_RAM;
-    cmd.play.ram_app = app;
-    cmd.play.embedded_name = nullptr;
-    cmd.play.duration_ms = duration_ms;
-    cmd.play.immediate = false;
+    // Notify task
+    xTaskNotify(ctx.task, NOTIFY_PLAY, eSetBits);
 
-    return send_command(&cmd);
+    return ESP_OK;
 }
 
 esp_err_t webp_player_stop() {
-    Command cmd = {};
-    cmd.type = CommandType::STOP;
-    return send_command(&cmd);
-}
+    if (!ctx.task) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
-esp_err_t webp_player_pause() {
-    Command cmd = {};
-    cmd.type = CommandType::PAUSE;
-    return send_command(&cmd);
-}
+    // Clear pending valid (signals stop)
+    ctx.pending.valid.store(false, std::memory_order_release);
 
-esp_err_t webp_player_resume() {
-    Command cmd = {};
-    cmd.type = CommandType::RESUME;
-    return send_command(&cmd);
+    // Notify task
+    xTaskNotify(ctx.task, NOTIFY_STOP, eSetBits);
+
+    return ESP_OK;
 }
 
 bool webp_player_is_playing() {
-    return player.state.load() == PlayerState::PLAYING;
-}
-
-bool webp_player_is_paused() {
-    return player.state.load() == PlayerState::PAUSED;
-}
-
-void webp_player_set_display_mode(bool enabled) {
-    player.display_mode.store(enabled);
-    if (!enabled) {
-        // Exiting display mode - clear need_next state
-        player.need_next_pending = false;
-    }
-    ESP_LOGI(TAG, "Display mode: %s", enabled ? "enabled" : "disabled");
-}
-
-void webp_player_request_next() {
-    if (!player.display_mode.load()) {
-        // Not in display mode - ignore
-        return;
-    }
-
-    // If already pending, don't emit duplicate event
-    if (player.need_next_pending) {
-        ESP_LOGD(TAG, "Request next: already pending");
-        return;
-    }
-
-    // Set pending flag and emit immediately
-    player.need_next_pending = true;
-    player.last_need_next_tick = xTaskGetTickCount();
-    emit_need_next_event();
-    ESP_LOGI(TAG, "Requested next app");
+    return ctx.state.load() == State::PLAYING;
 }

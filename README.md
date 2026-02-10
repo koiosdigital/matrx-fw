@@ -5,7 +5,7 @@ ESP32-based firmware for MATRX LED matrix display controllers. Manages dynamic c
 ## Features
 
 - **HUB75 LED Matrix Display** - DMA-accelerated driver supporting 64x32, 64x64, 128x32, and 128x64 panel configurations
-- **WebP Decoding** - Supports static and animated WebP content
+- **WebP Decoding** - Supports static and animated WebP content - _Now accelerated with Xtensa PIE instructions!_
 - **Content Scheduling** - Server-driven schedule with display durations, pinning, and smart pre-fetching
 - **WebSocket Communication** - Protobuf-serialized messaging for real-time server sync
 - **Button Controls** - Previous/pin/next navigation with hardware debouncing
@@ -15,15 +15,13 @@ ESP32-based firmware for MATRX LED matrix display controllers. Manages dynamic c
 
 ## Hardware Support
 
-| Variant | Description |
-|---------|-------------|
+| Variant  | Description                                     |
+| -------- | ----------------------------------------------- |
 | MATRX v9 | Primary version with 3 buttons and light sensor |
-| MATRX v8 | Previous generation |
-| Tidbyt v1/v2 | Compatible display devices |
 
 ## Requirements
 
-- ESP-IDF v5.5.1+
+- ESP-IDF v6.0-beta2+
 - [buf](https://buf.build/) CLI for protobuf generation
 
 ## Building
@@ -71,12 +69,12 @@ components/
 
 ## Button Controls
 
-| Button | Action |
-|--------|--------|
-| A | Previous item (unpins if pinned) |
-| B | Pin/unpin current item |
-| C | Next item (unpins if pinned) |
-| A+C (3s) | Factory reset |
+| Button   | Action                           |
+| -------- | -------------------------------- |
+| A        | Previous item (unpins if pinned) |
+| B        | Pin/unpin current item           |
+| C        | Next item (unpins if pinned)     |
+| A+C (3s) | Factory reset                    |
 
 ## License
 

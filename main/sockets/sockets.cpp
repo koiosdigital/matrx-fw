@@ -15,7 +15,6 @@
 #include <freertos/queue.h>
 
 #include <kd_common.h>
-#include <kd_ota.h>
 #include <kd/v1/matrx.pb-c.h>
 
 #include "apps.h"
@@ -30,8 +29,7 @@ namespace {
     //------------------------------------------------------------------------------
 
     constexpr size_t QUEUE_SIZE = 8;
-    constexpr size_t MAX_MSG_SIZE = 150 * 1024;  // 150KB
-    constexpr int64_t QUEUE_POLL_US = 100 * 1000;  // 100ms timer for queue processing
+    constexpr size_t MAX_MSG_SIZE = 16 * 1024;  // 16KB (largest msg is ~8KB chunk + overhead)
 
     //------------------------------------------------------------------------------
     // SPIRAM Allocator for Protobuf
@@ -58,7 +56,6 @@ namespace {
     enum class State : uint8_t {
         WaitingForNetwork,
         WaitingForCrypto,
-        WaitingForOTA,
         Ready,
         Connected,
     };
@@ -72,7 +69,6 @@ namespace {
         QueueHandle_t outbox = nullptr;
         QueueHandle_t inbox = nullptr;
         esp_websocket_client_handle_t client = nullptr;
-        esp_timer_handle_t queue_timer = nullptr;
         State state = State::WaitingForNetwork;
 
         // Receive buffer
@@ -96,7 +92,7 @@ namespace {
     void schedule_reconnect();
     esp_err_t start_client();
 
-    // Timer to check crypto/OTA state periodically until ready
+    // Timer to check crypto state periodically until ready
     esp_timer_handle_t state_check_timer = nullptr;
 
     // mTLS certificate data (cached for reconnections)
@@ -109,12 +105,8 @@ namespace {
     constexpr int64_t RECONNECT_DELAY_US = 2000 * 1000;  // 2 seconds
 
     //------------------------------------------------------------------------------
-    // Queue Processing (called by timer)
+    // Queue Processing (event-driven)
     //------------------------------------------------------------------------------
-
-    void queue_timer_callback(void*) {
-        process_queues();
-    }
 
     void process_queues() {
         if (!sock.is_connected()) return;
@@ -140,18 +132,6 @@ namespace {
                 }
                 heap_caps_free(in.data);
             }
-        }
-    }
-
-    void start_queue_timer() {
-        if (sock.queue_timer) {
-            esp_timer_start_periodic(sock.queue_timer, QUEUE_POLL_US);
-        }
-    }
-
-    void stop_queue_timer() {
-        if (sock.queue_timer) {
-            esp_timer_stop(sock.queue_timer);
         }
     }
 
@@ -194,14 +174,12 @@ namespace {
             show_fs_sprite("ready");
             msg_send_device_info();
             msg_send_schedule_request();
-            start_queue_timer();
             break;
 
         case WEBSOCKET_EVENT_DISCONNECTED:
         case WEBSOCKET_EVENT_CLOSED:
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGW(TAG, "Disconnected/error (event=%ld)", event_id);
-            stop_queue_timer();
             sock.rx_reset();
             if (sock.state == State::Connected) {
                 sock.state = State::Ready;
@@ -240,10 +218,12 @@ namespace {
                 sock.rx_len += data->data_len;
             }
 
-            // Complete?
+            // Complete? Process immediately
             if (sock.rx_buf && sock.rx_len >= sock.rx_expected) {
                 QueuedMessage msg = { sock.rx_buf, sock.rx_len };
-                if (xQueueSend(sock.inbox, &msg, 0) != pdTRUE) {
+                if (xQueueSend(sock.inbox, &msg, 0) == pdTRUE) {
+                    process_queues();
+                } else {
                     heap_caps_free(sock.rx_buf);
                 }
                 sock.rx_buf = nullptr;
@@ -336,25 +316,9 @@ namespace {
         case State::WaitingForCrypto: {
             CryptoState_t crypto_state = kd_common_crypto_get_state();
             if (crypto_state == CryptoState_t::CRYPTO_STATE_VALID_CERT) {
-                sock.state = State::WaitingForOTA;
-                //show_fs_sprite("check_updates");
-                try_advance_state();
-            }
-            break;
-        }
-
-        case State::WaitingForOTA: {
-#ifdef ENABLE_OTA
-            bool ota_done = kd_common_ota_has_completed_boot_check();
-            if (ota_done) {
                 sock.state = State::Ready;
                 try_advance_state();
             }
-#else
-            // OTA disabled, skip directly to Ready
-            sock.state = State::Ready;
-            try_advance_state();
-#endif
             break;
         }
 
@@ -377,7 +341,6 @@ namespace {
         if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
             if (sock.state != State::WaitingForNetwork) {
                 sock.state = State::WaitingForNetwork;
-                stop_queue_timer();
             }
         }
         else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -393,11 +356,9 @@ namespace {
     }
 
     void state_check_callback(void*) {
-        if (sock.state == State::WaitingForCrypto || sock.state == State::WaitingForOTA) {
+        if (sock.state == State::WaitingForCrypto) {
             try_advance_state();
-        }
-        else {
-            // No longer need to poll
+        } else {
             esp_timer_stop(state_check_timer);
         }
     }
@@ -419,17 +380,7 @@ void sockets_init() {
 
     msg_init(sock.outbox);
 
-    // Create queue processing timer
-    esp_timer_create_args_t queue_timer_args = {
-        .callback = queue_timer_callback,
-        .arg = nullptr,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "sock_queue",
-        .skip_unhandled_events = true,
-    };
-    esp_timer_create(&queue_timer_args, &sock.queue_timer);
-
-    // Create state check timer (for crypto/OTA polling)
+    // Create state check timer (for crypto polling)
     esp_timer_create_args_t state_timer_args = {
         .callback = state_check_callback,
         .arg = nullptr,
@@ -463,7 +414,6 @@ void sockets_init() {
 }
 
 void sockets_deinit() {
-    stop_queue_timer();
     if (reconnect_timer) {
         esp_timer_stop(reconnect_timer);
         esp_timer_delete(reconnect_timer);
@@ -473,10 +423,6 @@ void sockets_deinit() {
         esp_timer_stop(state_check_timer);
         esp_timer_delete(state_check_timer);
         state_check_timer = nullptr;
-    }
-    if (sock.queue_timer) {
-        esp_timer_delete(sock.queue_timer);
-        sock.queue_timer = nullptr;
     }
 
     if (sock.client) {
@@ -512,4 +458,8 @@ void sockets_deinit() {
 
 bool sockets_is_connected() {
     return sock.is_connected();
+}
+
+void sockets_flush_outbox() {
+    process_queues();
 }

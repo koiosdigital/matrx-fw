@@ -4,26 +4,108 @@ menu "MATRX hardware configuration"
         default 64
         help
             The width of the LED matrix in pixels.
-            64 = 64 pixels wide
-            128 = 128 pixels wide
 
     config MATRIX_HEIGHT
         int "Matrix height"
         default 32
         help
             The height of the LED matrix in pixels.
-            32 = 32 pixels high
-            64 = 64 pixels high
 
-    config HW_TYPE
-        int "Hardware type"
-        default 1
+    config DISPLAY_ENABLED
+        bool "Display enabled"
+        default y
         help
-            The type of hardware being used.
-            1 = MATRX_v9
-            2 = MATRX_v8
-            3 = TIDBYT_v1
-            4 = TIDBYT_v2
+            Enable the LED matrix display.
+
+    config HAS_VEML6030
+        bool "Has VEML6030 light sensor"
+        default y
+        help
+            Enable VEML6030 ambient light sensor support.
+
+    config HAS_THREE_BUTTONS
+        bool "Has three buttons"
+        default y
+        help
+            Enable three button input support.
+
+    menu "HUB75 RGB Pins"
+        config R1_PIN
+            int "R1 pin"
+            default 48
+
+        config G1_PIN
+            int "G1 pin"
+            default 38
+
+        config B1_PIN
+            int "B1 pin"
+            default 47
+
+        config R2_PIN
+            int "R2 pin"
+            default 18
+
+        config G2_PIN
+            int "G2 pin"
+            default 21
+
+        config B2_PIN
+            int "B2 pin"
+            default 16
+    endmenu
+
+    menu "HUB75 Address Pins"
+        config A_PIN
+            int "A pin"
+            default 14
+
+        config B_PIN
+            int "B pin"
+            default 15
+
+        config C_PIN
+            int "C pin"
+            default 12
+
+        config D_PIN
+            int "D pin"
+            default 13
+
+        config E_PIN
+            int "E pin"
+            default 17
+    endmenu
+
+    menu "HUB75 Control Pins"
+        config LAT_PIN
+            int "LAT pin"
+            default 11
+
+        config OE_PIN
+            int "OE pin"
+            default 9
+
+        config CLK_PIN
+            int "CLK pin"
+            default 10
+    endmenu
+
+    menu "I2C Pins"
+        config I2C_SDA
+            int "I2C SDA pin"
+            default 1
+
+        config I2C_SCL
+            int "I2C SCL pin"
+            default 2
+    endmenu
+
+    config VEML_INT_PIN
+        int "VEML6030 interrupt pin"
+        default 4
+        depends on HAS_VEML6030
+
     config MBEDTLS_PK_RSA_ALT_SUPPORT
         bool
         default y

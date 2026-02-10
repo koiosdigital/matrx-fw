@@ -19,15 +19,12 @@
 #include "scheduler.h"
 #include "daughterboard.h"
 #include "config.h"
-#include "auto_brightness.h"
 
 static const char* TAG = "main";
 
 extern "C" void app_main(void)
 {
-    //event loop
     esp_event_loop_create_default();
-
     display_init();
 
     // Initialize WebP player after display
@@ -40,15 +37,11 @@ extern "C" void app_main(void)
     show_fs_sprite("boot");
     vTaskDelay(pdMS_TO_TICKS(1200));
 
-    ESP_LOGI(TAG, "post display Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
-
     // Initialize daughterboard (light sensor and buttons)
     ret = daughterboard_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize daughterboard: %s", esp_err_to_name(ret));
     }
-
-    ESP_LOGI(TAG, "post daughterboard Free internal memory: %d bytes, ext: %d bytes", esp_get_free_internal_heap_size(), esp_get_free_heap_size());
 
     // Check if factory reset buttons are pressed (handle before kd_common_init)
     bool factory_reset_requested = daughterboard_is_button_pressed(0) && daughterboard_is_button_pressed(2);
@@ -84,12 +77,11 @@ extern "C" void app_main(void)
         perform_factory_reset("button hold");
     }
 
-    kd_common_set_provisioning_srp_password_format(ProvisioningSRPPasswordFormat_t::PROVISIONING_SRP_FORMAT_NUMERIC_6);
-
     // Show keygen sprite if key generation will occur
 #ifdef CONFIG_KD_COMMON_ENABLE_CRYPTO
     if (kd_common_crypto_will_generate_key()) {
         show_fs_sprite("keygen");
+        kdc_heap_check_integrity("post-keygen-sprite");
     }
 #endif
 
@@ -107,9 +99,6 @@ extern "C" void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize config module: %s", esp_err_to_name(ret));
     }
-
-    // Initialize auto brightness (registers event handler for light readings)
-    auto_brightness_init();
 
     sockets_init();
 

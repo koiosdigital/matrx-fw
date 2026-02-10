@@ -487,29 +487,6 @@ namespace {
         }
     }
 
-    void on_need_next() {
-        // Player has no valid content and needs something to display
-        switch (ctx.state) {
-            case State::ROTATING_WAITING: {
-                int idx = find_next_qualified(ctx.current_idx, false);
-                if (idx >= 0) {
-                    enter_rotating_playing(static_cast<size_t>(idx));
-                }
-                break;
-            }
-
-            case State::SINGLE_BLANK: {
-                if (ctx.pinned_app && app_is_qualified(ctx.pinned_app)) {
-                    enter_single_playing(ctx.pinned_app);
-                }
-                break;
-            }
-
-            default:
-                break;
-        }
-    }
-
     void webp_player_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
         switch (event_id) {
             case WEBP_PLAYER_EVT_PLAYING:
@@ -520,9 +497,6 @@ namespace {
                 break;
             case WEBP_PLAYER_EVT_ERROR:
                 on_error(static_cast<webp_player_error_evt_t*>(event_data));
-                break;
-            case WEBP_PLAYER_EVT_NEED_NEXT:
-                on_need_next();
                 break;
             default:
                 break;
@@ -669,7 +643,6 @@ void scheduler_on_pin_state_changed(const uint8_t* uuid, bool pinned) {
 
 void scheduler_on_connect() {
     ctx.connected = true;
-    webp_player_set_display_mode(true);
     msg_send_schedule_request();
     ESP_LOGI(TAG, "Connected - requesting schedule");
 }
@@ -679,7 +652,6 @@ void scheduler_on_disconnect() {
     stop_timers();
     ctx.pinned_app = nullptr;
 
-    webp_player_set_display_mode(false);
     webp_player_play_embedded("connecting", true);
 
     transition_to(State::IDLE);
