@@ -22,7 +22,10 @@ bool scheduler_has_schedule(void);
 void scheduler_on_schedule_received(void);
 
 // Called by handlers.cpp when render response arrives
-void scheduler_on_render_response(const uint8_t* uuid, bool success);
+void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displayable);
+
+// Called by handlers.cpp when pin state changes mid-session
+void scheduler_on_pin_state_changed(const uint8_t* uuid, bool pinned);
 
 // Called by sockets.cpp when connected
 void scheduler_on_connect(void);

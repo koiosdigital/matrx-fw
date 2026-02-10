@@ -85,6 +85,7 @@ namespace {
         }
 
         std::memcpy(app->uuid, uuid, 16);
+        app->displayable = true;  // Default to displayable until told otherwise
         g_apps[g_app_count++] = app;
         return app;
     }
@@ -240,18 +241,36 @@ void app_clear_data(App_t* app) {
     app->len = 0;
 }
 
-bool app_is_displayable(App_t* app) {
+void app_set_displayable(App_t* app, bool displayable) {
+    if (!app || !app->mutex) return;
+
+    MutexGuard lock(app->mutex);
+    if (!lock) return;
+
+    app->displayable = displayable;
+}
+
+bool app_has_data(App_t* app) {
     if (!app || !app->mutex) return false;
 
     MutexGuard lock(app->mutex);
     if (!lock) return false;
 
-    return app->len > 0 && !app->skipped;
+    return app->len > 0;
+}
+
+bool app_is_qualified(App_t* app) {
+    if (!app || !app->mutex) return false;
+
+    MutexGuard lock(app->mutex);
+    if (!lock) return false;
+
+    return app->len > 0 && app->displayable && !app->skipped;
 }
 
 void app_show(App_t* app) {
-    if (!app || !app_is_displayable(app)) {
-        ESP_LOGD(TAG, "app_show: app not displayable");
+    if (!app || !app_is_qualified(app)) {
+        ESP_LOGD(TAG, "app_show: app not qualified");
         return;
     }
 

@@ -83,6 +83,7 @@ namespace {
         // Frame timing
         int last_frame_timestamp = 0;
         TickType_t frame_tick = 0;
+        TickType_t loop_start_tick = 0;
 
         // Flags
         bool prepare_next_sent = false;
@@ -103,6 +104,7 @@ namespace {
             loop_duration_ms = 0;
             last_frame_timestamp = 0;
             frame_tick = 0;
+            loop_start_tick = 0;
             prepare_next_sent = false;
         }
 
@@ -230,25 +232,11 @@ namespace {
         }
 
         player.current.frame_count = player.anim_info.frame_count;
-
-        // Calculate loop duration by iterating through all frames
-        if (player.anim_info.frame_count > 1) {
-            uint8_t* buf;
-            int timestamp = 0;
-            while (WebPAnimDecoderHasMoreFrames(player.decoder)) {
-                if (!WebPAnimDecoderGetNext(player.decoder, &buf, &timestamp)) break;
-            }
-            player.current.loop_duration_ms = static_cast<uint32_t>(timestamp);
-            WebPAnimDecoderReset(player.decoder);
-        }
-        else {
-            player.current.loop_duration_ms = 0;
-        }
+        // loop_duration_ms will be measured after first loop completes
 
         xSemaphoreGive(player.decoder_mutex);
 
-        ESP_LOGI(TAG, "Decoder created: %u frames, loop %u ms",
-            player.current.frame_count, player.current.loop_duration_ms);
+        ESP_LOGI(TAG, "Decoder created: %u frames", player.current.frame_count);
         return ESP_OK;
     }
 
@@ -423,6 +411,7 @@ namespace {
 
         player.current.playback_start_tick = xTaskGetTickCount();
         player.current.frame_tick = player.current.playback_start_tick;
+        player.current.loop_start_tick = player.current.playback_start_tick;
         player.state.store(PlayerState::PLAYING);
 
         emit_playing_event();
@@ -508,7 +497,8 @@ namespace {
                 // Success - clear need_next state
                 player.need_next_pending = false;
                 ESP_LOGI(TAG, "Playback started successfully");
-            } else {
+            }
+            else {
                 ESP_LOGE(TAG, "start_playback failed: %s", esp_err_to_name(err));
                 player.state.store(PlayerState::IDLE);
                 display_clear();
@@ -597,6 +587,12 @@ namespace {
 
         // Check for loop completion
         if (!WebPAnimDecoderHasMoreFrames(player.decoder)) {
+            // Measure loop duration after first loop completes
+            if (player.current.loops_completed == 0) {
+                TickType_t now = xTaskGetTickCount();
+                player.current.loop_duration_ms = ticks_to_ms(now - player.current.loop_start_tick);
+            }
+
             player.current.loops_completed++;
 
             if (!should_continue_playing()) {
@@ -607,6 +603,7 @@ namespace {
 
             WebPAnimDecoderReset(player.decoder);
             player.current.last_frame_timestamp = 0;
+            player.current.loop_start_tick = xTaskGetTickCount();
         }
 
         // Get next frame
@@ -630,7 +627,7 @@ namespace {
         player.decode_error_count = 0;
 
         // Render frame (RGBA format, 4 bytes per pixel)
-        display_render_rgba_frame(frame_buffer, CONFIG_MATRIX_WIDTH, CONFIG_MATRIX_HEIGHT);
+        display_render_rgba_frame(frame_buffer, player.anim_info.canvas_width, player.anim_info.canvas_height);
 
         // Check if PREPARE_NEXT should be sent
         check_prepare_next();
@@ -646,7 +643,8 @@ namespace {
                 // Sleep for remaining time (capped to avoid overflow)
                 uint32_t remaining = player.current.requested_duration_ms - elapsed;
                 delay_ms = static_cast<int>(remaining > 60000 ? 60000 : remaining);
-            } else {
+            }
+            else {
                 delay_ms = 100;  // Default for unlimited duration
             }
         }

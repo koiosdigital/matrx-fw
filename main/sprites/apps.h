@@ -36,6 +36,7 @@ extern "C" {
         uint32_t display_time;    // Display duration in seconds (from schedule)
         bool pinned;              // Pinned state (from schedule)
         bool skipped;             // Skipped state (from schedule)
+        bool displayable;         // Server says contextually relevant (from render response)
         SemaphoreHandle_t mutex;  // Per-app mutex
         AppTransfer_t transfer;   // Chunked transfer state
     } App_t;
@@ -55,7 +56,9 @@ extern "C" {
     // Data management
     void app_set_data(App_t* app, const uint8_t* data, size_t len);
     void app_clear_data(App_t* app);
-    bool app_is_displayable(App_t* app);
+    void app_set_displayable(App_t* app, bool displayable);
+    bool app_has_data(App_t* app);      // len > 0
+    bool app_is_qualified(App_t* app);  // has_data && displayable && !skipped
 
     // Chunked transfer management
     bool app_transfer_start(App_t* app, size_t total_size, uint32_t total_chunks, const uint8_t* expected_sha256);
