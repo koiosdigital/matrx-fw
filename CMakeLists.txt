@@ -21,6 +21,8 @@ add_compile_definitions(FIRMWARE_VARIANT="${BUILD_VARIANT}")
 add_compile_definitions(ENABLE_OTA) #comment this line to disable OTA updates
 #End KD-Common OTA
 
+set(EXTRA_COMPONENT_DIRS ${CMAKE_SOURCE_DIR}/esp-hub75/components)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(matrx-fw)

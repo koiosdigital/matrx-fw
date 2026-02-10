@@ -6,5 +6,3 @@ dependencies:
   espressif/network_provisioning:
     version: "^1.2.2"
   espressif/esp_websocket_client: ^1.6.1
-  esphome/esp-hub75:
-    version: "^0.3.2"
