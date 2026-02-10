@@ -11,6 +11,6 @@ jobs:
   build:
     uses: acvigue/.github/.github/workflows/idf_build.yaml@main
     with:
-      idf_version: v5.5.1
+      idf_version: v6.0-beta2
       project_name: matrx-fw
       create_release: true
