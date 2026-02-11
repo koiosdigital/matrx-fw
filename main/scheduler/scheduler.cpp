@@ -279,6 +279,7 @@ namespace {
 
         request_render(app);
         start_retry_timer();
+        webp_player_stop();
         clear_screen();
 
         transition_to(State::SINGLE_BLANK);
@@ -307,6 +308,20 @@ namespace {
                 enter_single_blank(pinned);
             }
             return;
+        }
+
+        // Single app in schedule - use single mode (blank when not displayable)
+        if (count == 1) {
+            App_t* app = apps_get_by_index(0);
+            if (app && !app->skipped) {
+                ESP_LOGI(TAG, "Single app mode");
+                if (app_is_qualified(app)) {
+                    enter_single_playing(app);
+                } else {
+                    enter_single_blank(app);
+                }
+                return;
+            }
         }
 
         // Rotating mode - find first qualified
