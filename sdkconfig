@@ -4258,7 +4258,13 @@ CONFIG_HUB75_BIT_DEPTH=8
 # default:
 # CONFIG_HUB75_CLK_16MHZ is not set
 # default:
+# CONFIG_HUB75_CLK_18MHZ is not set
+# default:
 CONFIG_HUB75_CLK_20MHZ=y
+# default:
+# CONFIG_HUB75_CLK_23MHZ is not set
+# default:
+# CONFIG_HUB75_CLK_27MHZ is not set
 # default:
 # CONFIG_HUB75_CLK_32MHZ is not set
 # default:

@@ -7,6 +7,3 @@
 [submodule "components/protobufs"]
 	path = components/protobufs
 	url = https://github.com/koiosdigital/protobufs
-[submodule "components/esp-hub75"]
-	path = esp-hub75
-	url = https://github.com/acvigue/esp-hub75
