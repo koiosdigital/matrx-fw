@@ -104,6 +104,18 @@ namespace {
     esp_timer_handle_t reconnect_timer = nullptr;
     constexpr int64_t RECONNECT_DELAY_US = 2000 * 1000;  // 2 seconds
 
+    // Schedule retry timer (exponential backoff: 10s, 20s, 30s, 30s, ...)
+    esp_timer_handle_t schedule_retry_timer = nullptr;
+    int schedule_retry_count = 0;
+    constexpr int64_t SCHEDULE_RETRY_BASE_US = 10 * 1000 * 1000;  // 10 seconds
+    constexpr int64_t SCHEDULE_RETRY_STEP_US = 10 * 1000 * 1000;  // 10 second increment
+    constexpr int64_t SCHEDULE_RETRY_MAX_US  = 30 * 1000 * 1000;  // 30 second cap
+
+    int64_t next_schedule_retry_delay() {
+        int64_t delay = SCHEDULE_RETRY_BASE_US + (schedule_retry_count * SCHEDULE_RETRY_STEP_US);
+        return (delay > SCHEDULE_RETRY_MAX_US) ? SCHEDULE_RETRY_MAX_US : delay;
+    }
+
     //------------------------------------------------------------------------------
     // Queue Processing (event-driven)
     //------------------------------------------------------------------------------
@@ -138,6 +150,17 @@ namespace {
     //------------------------------------------------------------------------------
     // Reconnection
     //------------------------------------------------------------------------------
+
+    void schedule_retry_callback(void*) {
+        if (sock.is_connected() && !scheduler_has_schedule()) {
+            schedule_retry_count++;
+            int64_t next_delay = next_schedule_retry_delay();
+            ESP_LOGW(TAG, "No schedule received, retrying (attempt %d, next in %llds)",
+                     schedule_retry_count, next_delay / 1000000);
+            msg_send_schedule_request();
+            esp_timer_start_once(schedule_retry_timer, next_delay);
+        }
+    }
 
     void reconnect_timer_callback(void*) {
         ESP_LOGI(TAG, "Reconnect timer fired, destroying old client");
@@ -174,6 +197,10 @@ namespace {
             show_fs_sprite("ready");
             msg_send_device_info();
             msg_send_schedule_request();
+            // Start schedule retry timer with backoff
+            schedule_retry_count = 0;
+            esp_timer_stop(schedule_retry_timer);
+            esp_timer_start_once(schedule_retry_timer, next_schedule_retry_delay());
             break;
 
         case WEBSOCKET_EVENT_DISCONNECTED:
@@ -181,6 +208,7 @@ namespace {
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGW(TAG, "Disconnected/error (event=%ld)", event_id);
             sock.rx_reset();
+            esp_timer_stop(schedule_retry_timer);
             if (sock.state == State::Connected) {
                 sock.state = State::Ready;
                 scheduler_on_disconnect();
@@ -400,6 +428,16 @@ void sockets_init() {
     };
     esp_timer_create(&reconnect_timer_args, &reconnect_timer);
 
+    // Create schedule retry timer
+    esp_timer_create_args_t schedule_retry_args = {
+        .callback = schedule_retry_callback,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "sock_sched",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&schedule_retry_args, &schedule_retry_timer);
+
     // Register event handlers
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, nullptr);
@@ -414,6 +452,11 @@ void sockets_init() {
 }
 
 void sockets_deinit() {
+    if (schedule_retry_timer) {
+        esp_timer_stop(schedule_retry_timer);
+        esp_timer_delete(schedule_retry_timer);
+        schedule_retry_timer = nullptr;
+    }
     if (reconnect_timer) {
         esp_timer_stop(reconnect_timer);
         esp_timer_delete(reconnect_timer);
