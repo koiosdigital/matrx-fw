@@ -10,6 +10,7 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <esp_crt_bundle.h>
+#include <esp_system.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -30,6 +31,8 @@ namespace {
 
     constexpr size_t QUEUE_SIZE = 8;
     constexpr size_t MAX_MSG_SIZE = 16 * 1024;  // 16KB (largest msg is ~8KB chunk + overhead)
+    constexpr int MAX_SOCK_FAILURES_BEFORE_WIFI_RESET = 5;
+    constexpr int MAX_WIFI_RESETS_BEFORE_RESTART = 3;
 
     //------------------------------------------------------------------------------
     // SPIRAM Allocator for Protobuf
@@ -85,6 +88,9 @@ namespace {
             rx_len = rx_expected = 0;
         }
     } sock;
+
+    int sock_failure_count = 0;
+    int wifi_disconnect_count = 0;
 
     // Forward declarations
     void try_advance_state();
@@ -193,6 +199,8 @@ namespace {
         case WEBSOCKET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Connected");
             sock.state = State::Connected;
+            sock_failure_count = 0;
+            wifi_disconnect_count = 0;
             scheduler_on_connect();
             show_fs_sprite("ready");
             msg_send_device_info();
@@ -213,8 +221,32 @@ namespace {
                 sock.state = State::Ready;
                 scheduler_on_disconnect();
                 show_fs_sprite("connecting");
-                // Schedule reconnection via timer (can't block in event handler)
-                schedule_reconnect();
+
+                sock_failure_count++;
+                ESP_LOGW(TAG, "Socket failure %d/%d (wifi resets: %d/%d)",
+                         sock_failure_count, MAX_SOCK_FAILURES_BEFORE_WIFI_RESET,
+                         wifi_disconnect_count, MAX_WIFI_RESETS_BEFORE_RESTART);
+
+                if (sock_failure_count >= MAX_SOCK_FAILURES_BEFORE_WIFI_RESET) {
+                    wifi_disconnect_count++;
+                    sock_failure_count = 0;
+
+                    if (wifi_disconnect_count >= MAX_WIFI_RESETS_BEFORE_RESTART) {
+                        ESP_LOGE(TAG, "Too many WiFi resets (%d), restarting",
+                                 wifi_disconnect_count);
+                        esp_restart();
+                    }
+
+                    ESP_LOGW(TAG, "Too many socket failures, disconnecting WiFi (%d/%d)",
+                             wifi_disconnect_count, MAX_WIFI_RESETS_BEFORE_RESTART);
+                    if (sock.client) {
+                        esp_websocket_client_destroy(sock.client);
+                        sock.client = nullptr;
+                    }
+                    kd_common_wifi_disconnect();
+                } else {
+                    schedule_reconnect();
+                }
             }
             break;
 
