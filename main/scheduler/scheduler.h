@@ -11,9 +11,10 @@ extern "C" {
 // Initialize scheduler (registers event handlers)
 void scheduler_init(void);
 
-// Start/stop scheduler
+// Start/stop/deinit scheduler
 void scheduler_start(void);
 void scheduler_stop(void);
+void scheduler_deinit(void);
 
 // Check if scheduler has a valid schedule
 bool scheduler_has_schedule(void);

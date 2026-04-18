@@ -10,6 +10,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include "raii_utils.hpp"
 #include "display.h"
 #include "apps.h"
 
@@ -22,7 +23,7 @@ constexpr const char* NVS_KEY = "cfg";
 
 constexpr system_config_t DEFAULT_CONFIG = {
     .screen_enabled = true,
-    .screen_brightness = 255,
+    .screen_brightness = 128,
     .auto_brightness_enabled = false,
     .screen_off_lux = 1
 };
@@ -30,26 +31,16 @@ constexpr system_config_t DEFAULT_CONFIG = {
 system_config_t g_config = DEFAULT_CONFIG;
 SemaphoreHandle_t g_mutex = nullptr;
 
-// RAII mutex guard
-class MutexGuard {
-public:
-    explicit MutexGuard(SemaphoreHandle_t m) : mutex_(m), locked_(false) {
-        if (mutex_) {
-            locked_ = (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE);
-        }
+constexpr TickType_t CONFIG_MUTEX_TIMEOUT = pdMS_TO_TICKS(100);
+
+void erase_nvs_namespace(const char* ns) {
+    nvs_handle_t h;
+    if (nvs_open(ns, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_all(h);
+        nvs_commit(h);
+        nvs_close(h);
     }
-    ~MutexGuard() {
-        if (locked_ && mutex_) {
-            xSemaphoreGive(mutex_);
-        }
-    }
-    explicit operator bool() const { return locked_; }
-    MutexGuard(const MutexGuard&) = delete;
-    MutexGuard& operator=(const MutexGuard&) = delete;
-private:
-    SemaphoreHandle_t mutex_;
-    bool locked_;
-};
+}
 
 esp_err_t load_from_nvs() {
     nvs_handle_t handle;
@@ -120,14 +111,14 @@ esp_err_t config_init() {
 }
 
 system_config_t config_get() {
-    MutexGuard lock(g_mutex);
+    raii::MutexGuard lock(g_mutex, CONFIG_MUTEX_TIMEOUT);
     return lock ? g_config : DEFAULT_CONFIG;
 }
 
 esp_err_t config_set(const system_config_t* config) {
     if (!config) return ESP_ERR_INVALID_ARG;
 
-    MutexGuard lock(g_mutex);
+    raii::MutexGuard lock(g_mutex, CONFIG_MUTEX_TIMEOUT);
     if (!lock) return ESP_ERR_TIMEOUT;
 
     g_config = *config;
@@ -145,21 +136,11 @@ void perform_factory_reset(const char* reason) {
 
     // Erase WiFi
     if (esp_wifi_restore() != ESP_OK) {
-        nvs_handle_t h;
-        if (nvs_open("nvs.net80211", NVS_READWRITE, &h) == ESP_OK) {
-            nvs_erase_all(h);
-            nvs_commit(h);
-            nvs_close(h);
-        }
+        erase_nvs_namespace("nvs.net80211");
     }
 
     // Erase config
-    nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_erase_all(h);
-        nvs_commit(h);
-        nvs_close(h);
-    }
+    erase_nvs_namespace(NVS_NAMESPACE);
 
     show_fs_sprite("factory_reset_success");
     vTaskDelay(pdMS_TO_TICKS(2000));

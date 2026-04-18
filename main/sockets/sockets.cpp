@@ -68,6 +68,8 @@ namespace {
         size_t len;
     };
 
+    SemaphoreHandle_t client_mutex = nullptr;
+
     struct {
         QueueHandle_t outbox = nullptr;
         QueueHandle_t inbox = nullptr;
@@ -79,15 +81,26 @@ namespace {
         size_t rx_len = 0;
         size_t rx_expected = 0;
 
-        bool is_connected() const {
-            return client != nullptr && esp_websocket_client_is_connected(client);
-        }
-
         void rx_reset() {
             if (rx_buf) { heap_caps_free(rx_buf); rx_buf = nullptr; }
             rx_len = rx_expected = 0;
         }
     } sock;
+
+    bool is_connected() {
+        if (!client_mutex) return false;
+        if (xSemaphoreTake(client_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+        bool connected = sock.client != nullptr && esp_websocket_client_is_connected(sock.client);
+        xSemaphoreGive(client_mutex);
+        return connected;
+    }
+
+    void destroy_ws_client() {
+        if (sock.client) {
+            esp_websocket_client_destroy(sock.client);
+            sock.client = nullptr;
+        }
+    }
 
     int sock_failure_count = 0;
     int wifi_disconnect_count = 0;
@@ -127,12 +140,12 @@ namespace {
     //------------------------------------------------------------------------------
 
     void process_queues() {
-        if (!sock.is_connected()) return;
+        if (!is_connected()) return;
 
         // Send outbound
         QueuedMessage out;
         while (xQueueReceive(sock.outbox, &out, 0) == pdTRUE) {
-            if (out.data && sock.is_connected()) {
+            if (out.data && is_connected()) {
                 esp_websocket_client_send_bin(sock.client,
                     reinterpret_cast<char*>(out.data), out.len, pdMS_TO_TICKS(5000));
             }
@@ -158,7 +171,7 @@ namespace {
     //------------------------------------------------------------------------------
 
     void schedule_retry_callback(void*) {
-        if (sock.is_connected() && !scheduler_has_schedule()) {
+        if (is_connected() && !scheduler_has_schedule()) {
             schedule_retry_count++;
             int64_t next_delay = next_schedule_retry_delay();
             ESP_LOGW(TAG, "No schedule received, retrying (attempt %d, next in %llds)",
@@ -170,10 +183,7 @@ namespace {
 
     void reconnect_timer_callback(void*) {
         ESP_LOGI(TAG, "Reconnect timer fired, destroying old client");
-        if (sock.client) {
-            esp_websocket_client_destroy(sock.client);
-            sock.client = nullptr;
-        }
+        destroy_ws_client();
         if (sock.state == State::Ready) {
             start_client();
         }
@@ -239,10 +249,7 @@ namespace {
 
                     ESP_LOGW(TAG, "Too many socket failures, disconnecting WiFi (%d/%d)",
                              wifi_disconnect_count, MAX_WIFI_RESETS_BEFORE_RESTART);
-                    if (sock.client) {
-                        esp_websocket_client_destroy(sock.client);
-                        sock.client = nullptr;
-                    }
+                    destroy_ws_client();
                     kd_common_wifi_disconnect();
                 } else {
                     schedule_reconnect();
@@ -303,8 +310,7 @@ namespace {
     esp_err_t start_client() {
         if (sock.client) {
             ESP_LOGW(TAG, "Client already initialized, destroying first");
-            esp_websocket_client_destroy(sock.client);
-            sock.client = nullptr;
+            destroy_ws_client();
         }
 
         // Initialize certificate data if not already cached
@@ -430,6 +436,7 @@ namespace {
 //------------------------------------------------------------------------------
 
 void sockets_init() {
+    client_mutex = xSemaphoreCreateMutex();
     sock.outbox = xQueueCreate(QUEUE_SIZE, sizeof(QueuedMessage));
     sock.inbox = xQueueCreate(QUEUE_SIZE, sizeof(QueuedMessage));
 
@@ -484,6 +491,9 @@ void sockets_init() {
 }
 
 void sockets_deinit() {
+    esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler);
+    esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler);
+
     if (schedule_retry_timer) {
         esp_timer_stop(schedule_retry_timer);
         esp_timer_delete(schedule_retry_timer);
@@ -502,8 +512,7 @@ void sockets_deinit() {
 
     if (sock.client) {
         esp_websocket_client_stop(sock.client);
-        esp_websocket_client_destroy(sock.client);
-        sock.client = nullptr;
+        destroy_ws_client();
     }
 
     sock.rx_reset();
@@ -529,10 +538,15 @@ void sockets_deinit() {
         while (xQueueReceive(sock.inbox, &msg, 0) == pdTRUE) heap_caps_free(msg.data);
         vQueueDelete(sock.inbox);
     }
+
+    if (client_mutex) {
+        vSemaphoreDelete(client_mutex);
+        client_mutex = nullptr;
+    }
 }
 
 bool sockets_is_connected() {
-    return sock.is_connected();
+    return is_connected();
 }
 
 void sockets_flush_outbox() {

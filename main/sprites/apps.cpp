@@ -6,6 +6,7 @@
 #include <esp_heap_caps.h>
 #include <psa/crypto.h>
 
+#include "raii_utils.hpp"
 #include "webp_player.h"
 #include "static_files.h"
 #include "matrx.pb-c.h"
@@ -20,29 +21,6 @@ namespace {
     App_t* g_apps[MAX_APPS] = { nullptr };
     size_t g_app_count = 0;
     SemaphoreHandle_t g_apps_mutex = nullptr;
-
-    // RAII mutex guard
-    class MutexGuard {
-    public:
-        explicit MutexGuard(SemaphoreHandle_t m) : mutex_(m), locked_(false) {
-            if (mutex_) {
-                locked_ = (xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE);
-            }
-        }
-        ~MutexGuard() {
-            if (locked_ && mutex_) {
-                xSemaphoreGive(mutex_);
-            }
-        }
-        explicit operator bool() const { return locked_; }
-
-        MutexGuard(const MutexGuard&) = delete;
-        MutexGuard& operator=(const MutexGuard&) = delete;
-
-    private:
-        SemaphoreHandle_t mutex_;
-        bool locked_;
-    };
 
     // Allocate in SPIRAM with zero-init
     uint8_t* alloc_spiram(size_t size) {
@@ -128,7 +106,7 @@ void apps_init() {
 }
 
 void apps_cleanup() {
-    MutexGuard lock(g_apps_mutex);
+    raii::MutexGuard lock(g_apps_mutex);
     if (!lock) return;
 
     for (size_t i = 0; i < g_app_count; i++) {
@@ -141,7 +119,7 @@ void apps_cleanup() {
 }
 
 void apps_sync_schedule(Kd__V1__ScheduleItem** items, size_t count) {
-    MutexGuard lock(g_apps_mutex);
+    raii::MutexGuard lock(g_apps_mutex);
     if (!lock) return;
 
     // Mark all existing apps for potential removal
@@ -188,7 +166,7 @@ void apps_sync_schedule(Kd__V1__ScheduleItem** items, size_t count) {
 App_t* app_find(const uint8_t* uuid) {
     if (!uuid) return nullptr;
 
-    MutexGuard lock(g_apps_mutex);
+    raii::MutexGuard lock(g_apps_mutex);
     if (!lock) return nullptr;
 
     int idx = find_app_index_unlocked(uuid);
@@ -196,12 +174,12 @@ App_t* app_find(const uint8_t* uuid) {
 }
 
 size_t apps_count() {
-    MutexGuard lock(g_apps_mutex);
+    raii::MutexGuard lock(g_apps_mutex);
     return lock ? g_app_count : 0;
 }
 
 App_t* apps_get_by_index(size_t index) {
-    MutexGuard lock(g_apps_mutex);
+    raii::MutexGuard lock(g_apps_mutex);
     if (!lock || index >= g_app_count) return nullptr;
     return g_apps[index];
 }
@@ -209,7 +187,7 @@ App_t* apps_get_by_index(size_t index) {
 void app_set_data(App_t* app, const uint8_t* data, size_t len) {
     if (!app || !app->mutex) return;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return;
 
     // Free old data
@@ -233,7 +211,7 @@ void app_set_data(App_t* app, const uint8_t* data, size_t len) {
 void app_clear_data(App_t* app) {
     if (!app || !app->mutex) return;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return;
 
     heap_caps_free(app->data);
@@ -244,7 +222,7 @@ void app_clear_data(App_t* app) {
 void app_set_displayable(App_t* app, bool displayable) {
     if (!app || !app->mutex) return;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return;
 
     app->displayable = displayable;
@@ -253,7 +231,7 @@ void app_set_displayable(App_t* app, bool displayable) {
 bool app_has_data(App_t* app) {
     if (!app || !app->mutex) return false;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return false;
 
     return app->len > 0;
@@ -262,7 +240,7 @@ bool app_has_data(App_t* app) {
 bool app_is_qualified(App_t* app) {
     if (!app || !app->mutex) return false;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return false;
 
     return app->len > 0 && app->displayable && !app->skipped;
@@ -276,7 +254,7 @@ void app_show(App_t* app) {
 
     // Use webp_player to display the app
     // The player will copy the data internally, so we don't need to manage a buffer here
-    webp_player_play_app(app, app->display_time, true);
+    webp_player_play_app(app, app->display_time);
 }
 
 void show_fs_sprite(const char* name) {
@@ -284,7 +262,7 @@ void show_fs_sprite(const char* name) {
 
     // Use webp_player for embedded sprites
     // Embedded sprites loop forever until stopped or replaced
-    webp_player_play_embedded(name, true);
+    webp_player_play_embedded(name);
 }
 
 //------------------------------------------------------------------------------
@@ -294,7 +272,7 @@ void show_fs_sprite(const char* name) {
 bool app_transfer_start(App_t* app, size_t total_size, uint32_t total_chunks, const uint8_t* expected_sha256) {
     if (!app || !app->mutex || total_size == 0 || total_chunks == 0) return false;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return false;
 
     // Cancel any existing transfer
@@ -317,6 +295,8 @@ bool app_transfer_start(App_t* app, size_t total_size, uint32_t total_chunks, co
 
     if (expected_sha256) {
         std::memcpy(app->transfer.expected_sha256, expected_sha256, 32);
+    } else {
+        std::memset(app->transfer.expected_sha256, 0, 32);
     }
 
     ESP_LOGI(TAG, "Transfer started: %zu bytes in %u chunks", total_size, total_chunks);
@@ -326,7 +306,7 @@ bool app_transfer_start(App_t* app, size_t total_size, uint32_t total_chunks, co
 bool app_transfer_add_chunk(App_t* app, uint32_t chunk_index, const uint8_t* data, size_t len) {
     if (!app || !app->mutex || !data || len == 0) return false;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return false;
 
     if (!app->transfer.active || !app->transfer.buffer) {
@@ -361,7 +341,7 @@ bool app_transfer_add_chunk(App_t* app, uint32_t chunk_index, const uint8_t* dat
 bool app_transfer_is_complete(App_t* app) {
     if (!app || !app->mutex) return false;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return false;
 
     return app->transfer.active &&
@@ -371,7 +351,7 @@ bool app_transfer_is_complete(App_t* app) {
 bool app_transfer_finalize(App_t* app) {
     if (!app || !app->mutex) return false;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return false;
 
     if (!app->transfer.active || !app->transfer.buffer) {
@@ -388,8 +368,15 @@ bool app_transfer_finalize(App_t* app) {
     // Verify SHA256
     uint8_t computed_sha256[32];
     size_t hash_len;
-    psa_hash_compute(PSA_ALG_SHA_256, app->transfer.buffer, app->transfer.total_size,
-                     computed_sha256, sizeof(computed_sha256), &hash_len);
+    psa_status_t hash_status = psa_hash_compute(PSA_ALG_SHA_256, app->transfer.buffer,
+        app->transfer.total_size, computed_sha256, sizeof(computed_sha256), &hash_len);
+    if (hash_status != PSA_SUCCESS) {
+        ESP_LOGE(TAG, "SHA256 computation failed: %d", hash_status);
+        heap_caps_free(app->transfer.buffer);
+        app->transfer.buffer = nullptr;
+        app->transfer.active = false;
+        return false;
+    }
 
     if (std::memcmp(computed_sha256, app->transfer.expected_sha256, 32) != 0) {
         ESP_LOGE(TAG, "SHA256 mismatch, discarding transfer");
@@ -419,7 +406,7 @@ bool app_transfer_finalize(App_t* app) {
 void app_transfer_cancel(App_t* app) {
     if (!app || !app->mutex) return;
 
-    MutexGuard lock(app->mutex);
+    raii::MutexGuard lock(app->mutex);
     if (!lock) return;
 
     if (app->transfer.buffer) {

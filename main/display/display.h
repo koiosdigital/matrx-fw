@@ -19,6 +19,12 @@ extern "C" {
      */
     void display_init();
 
+    /**
+     * Deinitialize the display module.
+     * Unregisters event handlers.
+     */
+    void display_deinit();
+
     //------------------------------------------------------------------------------
     // Rendering Functions
     //------------------------------------------------------------------------------

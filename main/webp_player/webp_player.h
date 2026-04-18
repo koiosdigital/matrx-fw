@@ -96,10 +96,9 @@ void webp_player_deinit(void);
  *
  * @param app         Pointer to App_t (data copied, app struct must remain valid for event payload)
  * @param duration_ms Display duration in ms (0 = loop forever)
- * @param immediate   If true, interrupts current playback immediately
  * @return ESP_OK on success
  */
-esp_err_t webp_player_play_app(App_t* app, uint32_t duration_ms, bool immediate);
+esp_err_t webp_player_play_app(App_t* app, uint32_t duration_ms);
 
 /**
  * Play an embedded sprite from flash.
@@ -107,10 +106,9 @@ esp_err_t webp_player_play_app(App_t* app, uint32_t duration_ms, bool immediate)
  * Embedded sprites always loop forever until stopped or replaced.
  *
  * @param name        Name of embedded sprite (e.g., "boot", "connecting", "ready")
- * @param immediate   If true, interrupts current playback immediately
  * @return ESP_OK on success, ESP_ERR_NOT_FOUND if sprite doesn't exist
  */
-esp_err_t webp_player_play_embedded(const char* name, bool immediate);
+esp_err_t webp_player_play_embedded(const char* name);
 
 /**
  * Stop playback and go idle.

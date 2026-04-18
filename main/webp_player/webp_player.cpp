@@ -358,8 +358,10 @@ namespace {
         // Retry: recreate decoder
         vTaskDelay(pdMS_TO_TICKS(WEBP_PLAYER_RETRY_DELAY_MS));
         if (create_decoder() != ESP_OK) {
-            ctx.decode_error_count = WEBP_PLAYER_RETRY_COUNT;
-            handle_decode_error();
+            ESP_LOGE(TAG, "Decoder recreation failed, giving up");
+            emit_error_event(ESP_FAIL);
+            display_clear();
+            goto_idle();
         }
     }
 
@@ -557,7 +559,7 @@ void webp_player_deinit() {
     ESP_LOGI(TAG, "WebP player deinitialized");
 }
 
-esp_err_t webp_player_play_app(App_t* app, uint32_t duration_ms, bool immediate) {
+esp_err_t webp_player_play_app(App_t* app, uint32_t duration_ms) {
     if (!ctx.task) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -575,7 +577,7 @@ esp_err_t webp_player_play_app(App_t* app, uint32_t duration_ms, bool immediate)
     return ESP_OK;
 }
 
-esp_err_t webp_player_play_embedded(const char* name, bool immediate) {
+esp_err_t webp_player_play_embedded(const char* name) {
     if (!ctx.task) {
         return ESP_ERR_INVALID_STATE;
     }

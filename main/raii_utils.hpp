@@ -11,7 +11,7 @@ class MutexGuard {
 public:
     explicit MutexGuard(SemaphoreHandle_t mutex, TickType_t timeout = portMAX_DELAY)
         : mutex_(mutex)
-        , acquired_(xSemaphoreTake(mutex, timeout) == pdTRUE) {}
+        , acquired_(mutex ? (xSemaphoreTake(mutex, timeout) == pdTRUE) : false) {}
 
     ~MutexGuard() {
         if (acquired_) {

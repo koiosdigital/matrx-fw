@@ -24,11 +24,16 @@ static const char* TAG = "main";
 
 extern "C" void app_main(void)
 {
-    esp_event_loop_create_default();
+    esp_err_t err = esp_event_loop_create_default();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create event loop: %s", esp_err_to_name(err));
+        return;
+    }
     display_init();
 
     // Initialize WebP player after display
-    esp_err_t ret = webp_player_init();
+    esp_err_t ret;
+    ret = webp_player_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize WebP player: %s", esp_err_to_name(ret));
     }

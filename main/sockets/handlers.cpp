@@ -13,6 +13,19 @@ static const char* TAG = "handlers";
 
 namespace {
 
+    bool validate_uuid(const ProtobufCBinaryData& uuid, const char* context) {
+        if (uuid.len != 16) {
+            ESP_LOGW(TAG, "Invalid %s UUID length: %zu", context, uuid.len);
+            return false;
+        }
+        return true;
+    }
+
+    void app_clear_data_and_hash(App_t* app) {
+        app_clear_data(app);
+        memset(app->sha256, 0, sizeof(app->sha256));
+    }
+
     void handle_schedule(Kd__V1__Schedule* schedule) {
         if (schedule == nullptr) return;
 
@@ -23,10 +36,7 @@ namespace {
 
     void handle_app_render_response(Kd__V1__AppRenderResponse* response) {
         if (response == nullptr) return;
-        if (response->app_uuid.len != 16) {
-            ESP_LOGW(TAG, "Invalid app UUID length: %zu", response->app_uuid.len);
-            return;
-        }
+        if (!validate_uuid(response->app_uuid, "render response")) return;
 
         ESP_LOGI(TAG, "RX render response: uuid=...%02x%02x, displayable=%d, size=%u, chunks=%u",
                  response->app_uuid.data[14], response->app_uuid.data[15],
@@ -44,8 +54,7 @@ namespace {
         // Case 1: Not displayable (no chunks will follow)
         if (!response->displayable) {
             ESP_LOGI(TAG, "App not displayable, clearing data");
-            app_clear_data(app);
-            memset(app->sha256, 0, sizeof(app->sha256));
+            app_clear_data_and_hash(app);
             scheduler_on_render_response(response->app_uuid.data, true, false);
             return;
         }
@@ -53,8 +62,7 @@ namespace {
         // Case 2: Displayable but empty (no chunks will follow)
         if (response->total_size == 0) {
             ESP_LOGI(TAG, "App render response: empty (clearing data)");
-            app_clear_data(app);
-            memset(app->sha256, 0, sizeof(app->sha256));
+            app_clear_data_and_hash(app);
             scheduler_on_render_response(response->app_uuid.data, true, true);
             return;
         }
@@ -80,10 +88,7 @@ namespace {
 
     void handle_app_data_chunk(Kd__V1__AppDataChunk* chunk) {
         if (chunk == nullptr) return;
-        if (chunk->app_uuid.len != 16) {
-            ESP_LOGW(TAG, "Invalid chunk UUID length: %zu", chunk->app_uuid.len);
-            return;
-        }
+        if (!validate_uuid(chunk->app_uuid, "chunk")) return;
 
         ESP_LOGI(TAG, "RX chunk: idx=%u, len=%zu, uuid=...%02x%02x",
                  chunk->chunk_index, chunk->data.len,
@@ -94,8 +99,7 @@ namespace {
             ESP_LOGI(TAG, "Zero-length chunk, treating as empty app");
             App_t* app = app_find(chunk->app_uuid.data);
             if (app) {
-                app_clear_data(app);
-                memset(app->sha256, 0, sizeof(app->sha256));
+                app_clear_data_and_hash(app);
                 scheduler_on_render_response(chunk->app_uuid.data, true, app->displayable);
             }
             return;
@@ -165,10 +169,7 @@ namespace {
 
     void handle_pin_state_change(Kd__V1__ScheduleItemSetPinState* msg) {
         if (msg == nullptr) return;
-        if (msg->uuid.len != 16) {
-            ESP_LOGW(TAG, "Invalid pin state UUID length: %zu", msg->uuid.len);
-            return;
-        }
+        if (!validate_uuid(msg->uuid, "pin state")) return;
 
         ESP_LOGI(TAG, "Pin state change: uuid=...%02x%02x, pinned=%d",
                  msg->uuid.data[14], msg->uuid.data[15], msg->pinned);

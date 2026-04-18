@@ -18,7 +18,7 @@ ENDIF()
 
 message("Building version ${PROJECT_VER} for variant ${BUILD_VARIANT}")
 add_compile_definitions(FIRMWARE_VARIANT="${BUILD_VARIANT}")
-add_compile_definitions(ENABLE_OTA) #comment this line to disable OTA updates
+# OTA is now controlled by CONFIG_KD_COMMON_OTA_ENABLE in Kconfig
 #End KD-Common OTA
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

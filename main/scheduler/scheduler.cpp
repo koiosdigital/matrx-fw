@@ -9,6 +9,8 @@
 #include <esp_timer.h>
 #include <esp_event.h>
 
+#include "raii_utils.hpp"
+
 #include "apps.h"
 #include "webp_player.h"
 #include "display.h"
@@ -61,7 +63,7 @@ namespace {
         esp_timer_handle_t prepare_timer = nullptr;
         esp_timer_handle_t retry_timer = nullptr;
         uint32_t playback_start_ms = 0;    // When current app started
-        bool connected = false;
+        SemaphoreHandle_t mutex = nullptr;
     };
 
     Context ctx;
@@ -139,7 +141,7 @@ namespace {
         if (count == 0) return -1;
 
         size_t start = skip_current ? 1 : 0;
-        for (size_t i = start; i <= count; i++) {
+        for (size_t i = start; i < count; i++) {
             size_t idx = (from_idx + i) % count;
             App_t* app = apps_get_by_index(idx);
             if (app && app_is_qualified(app)) {
@@ -155,7 +157,7 @@ namespace {
         if (count == 0) return -1;
 
         size_t start = skip_current ? 1 : 0;
-        for (size_t i = start; i <= count; i++) {
+        for (size_t i = start; i < count; i++) {
             size_t idx = (from_idx + i) % count;
             App_t* app = apps_get_by_index(idx);
             if (app && !app->skipped) {
@@ -190,7 +192,7 @@ namespace {
     //--------------------------------------------------------------------------
 
     void show_ready() {
-        webp_player_play_embedded("ready", true);
+        webp_player_play_embedded("ready");
     }
 
     void clear_screen() {
@@ -203,7 +205,7 @@ namespace {
         uint32_t duration_ms = app->display_time * 1000;
         ctx.playback_start_ms = now_ms();
 
-        webp_player_play_app(app, duration_ms, true);
+        webp_player_play_app(app, duration_ms);
         start_prepare_timer(duration_ms);
 
         ESP_LOGI(TAG, "Playing app %02x%02x... (duration: %ums)",
@@ -392,6 +394,9 @@ namespace {
     //--------------------------------------------------------------------------
 
     void retry_timer_callback(void*) {
+        raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+        if (!lock) return;
+
         ESP_LOGI(TAG, "Retry timer fired");
 
         switch (ctx.state) {
@@ -429,6 +434,9 @@ namespace {
     }
 
     void prepare_timer_callback(void*) {
+        raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+        if (!lock) return;
+
         ESP_LOGD(TAG, "Prepare timer fired");
 
         switch (ctx.state) {
@@ -525,6 +533,8 @@ namespace {
 //------------------------------------------------------------------------------
 
 void scheduler_init() {
+    ctx.mutex = xSemaphoreCreateMutex();
+
     // Create retry timer
     esp_timer_create_args_t retry_args = {
         .callback = retry_timer_callback,
@@ -578,6 +588,31 @@ void scheduler_start() {
 void scheduler_stop() {
     enter_idle();
     ESP_LOGI(TAG, "Scheduler stopped");
+}
+
+void scheduler_deinit() {
+    enter_idle();
+
+    esp_event_handler_unregister(WEBP_PLAYER_EVENTS, ESP_EVENT_ANY_ID, webp_player_event_handler);
+    esp_event_handler_unregister(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED, nullptr);
+    esp_event_handler_unregister(DAUGHTERBOARD_EVENTS, DAUGHTERBOARD_EVENT_BUTTON_C_PRESSED, nullptr);
+
+    if (ctx.retry_timer) {
+        esp_timer_stop(ctx.retry_timer);
+        esp_timer_delete(ctx.retry_timer);
+        ctx.retry_timer = nullptr;
+    }
+    if (ctx.prepare_timer) {
+        esp_timer_stop(ctx.prepare_timer);
+        esp_timer_delete(ctx.prepare_timer);
+        ctx.prepare_timer = nullptr;
+    }
+    if (ctx.mutex) {
+        vSemaphoreDelete(ctx.mutex);
+        ctx.mutex = nullptr;
+    }
+
+    ESP_LOGI(TAG, "Scheduler deinitialized");
 }
 
 bool scheduler_has_schedule() {
@@ -657,17 +692,15 @@ void scheduler_on_pin_state_changed(const uint8_t* uuid, bool pinned) {
 }
 
 void scheduler_on_connect() {
-    ctx.connected = true;
     msg_send_schedule_request();
     ESP_LOGI(TAG, "Connected - requesting schedule");
 }
 
 void scheduler_on_disconnect() {
-    ctx.connected = false;
     stop_timers();
     ctx.pinned_app = nullptr;
 
-    webp_player_play_embedded("connecting", true);
+    webp_player_play_embedded("connecting");
 
     transition_to(State::IDLE);
     ESP_LOGI(TAG, "Disconnected - showing connecting sprite");
@@ -716,7 +749,7 @@ void scheduler_prev() {
     if (count == 0) return;
 
     // Search backwards for previous qualified
-    for (size_t i = 1; i <= count; i++) {
+    for (size_t i = 1; i < count; i++) {
         size_t idx = (ctx.current_idx + count - i) % count;
         App_t* app = apps_get_by_index(idx);
         if (app && app_is_qualified(app)) {

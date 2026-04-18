@@ -43,7 +43,7 @@ bool msg_queue(const Kd__V1__MatrxMessage* message) {
     struct { uint8_t* data; size_t len; } msg = { buf, len };
     if (xQueueSend(g_outbox, &msg, pdMS_TO_TICKS(100)) != pdTRUE) {
         ESP_LOGW(TAG, "Outbox full");
-        free(buf);
+        heap_caps_free(buf);
         return false;
     }
     sockets_flush_outbox();
@@ -96,7 +96,7 @@ void msg_send_claim_if_needed() {
     if (token == nullptr) return;
 
     if (kd_common_get_claim_token(reinterpret_cast<char*>(token), &token_len) != ESP_OK || token_len == 0) {
-        free(token);
+        heap_caps_free(token);
         return;
     }
 
@@ -110,7 +110,7 @@ void msg_send_claim_if_needed() {
 
     msg_queue(&msg);
     g_last_claim_ms = now;
-    free(token);
+    heap_caps_free(token);
 
     ESP_LOGI(TAG, "Sent claim request");
 }

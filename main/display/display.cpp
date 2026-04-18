@@ -138,7 +138,7 @@ namespace {
         }
 
         display_render_rgb_buffer(display_buffer, buffer_size);
-        free(display_buffer);
+        heap_caps_free(display_buffer);
 
         ESP_LOGI(TAG, "Displaying POP code: %s", pop_token);
     }
@@ -151,14 +151,14 @@ namespace {
         else if (event_id == PROTOCOMM_TRANSPORT_BLE_DISCONNECTED) {
             if (!kd_common_is_wifi_connected()) {
                 ESP_LOGI(TAG, "BLE disconnected during provisioning, showing setup sprite");
-                webp_player_play_embedded("setup", true);
+                webp_player_play_embedded("setup");
             }
         }
     }
 
     void prov_event_handler(void*, esp_event_base_t, int32_t event_id, void*) {
         if (event_id == NETWORK_PROV_START) {
-            webp_player_play_embedded("setup", true);
+            webp_player_play_embedded("setup");
         }
         else if (event_id == NETWORK_PROV_END) {
             // Don't show connecting if already connected to websocket
@@ -167,7 +167,7 @@ namespace {
             wifi_config_t wifi_cfg;
             if (esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg) == ESP_OK &&
                 std::strlen(reinterpret_cast<const char*>(wifi_cfg.sta.ssid)) != 0) {
-                webp_player_play_embedded("connecting", true);
+                webp_player_play_embedded("connecting");
             }
         }
     }
@@ -177,7 +177,7 @@ namespace {
             wifi_config_t wifi_cfg;
             if (esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg) == ESP_OK &&
                 std::strlen(reinterpret_cast<const char*>(wifi_cfg.sta.ssid)) != 0) {
-                webp_player_play_embedded("connecting", true);
+                webp_player_play_embedded("connecting");
             }
         }
     }
@@ -195,7 +195,6 @@ void display_init() {
     dma_display.clear();
 #endif
 
-    // Register event handlers for provisioning display states
     esp_event_handler_register(PROTOCOMM_TRANSPORT_BLE_EVENT, ESP_EVENT_ANY_ID,
         ble_event_handler, nullptr);
     esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID,
@@ -206,9 +205,19 @@ void display_init() {
     ESP_LOGI(TAG, "Display initialized");
 }
 
+void display_deinit() {
+    esp_event_handler_unregister(PROTOCOMM_TRANSPORT_BLE_EVENT, ESP_EVENT_ANY_ID, ble_event_handler);
+    esp_event_handler_unregister(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, prov_event_handler);
+    esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_START, wifi_event_handler);
+
+    ESP_LOGI(TAG, "Display deinitialized");
+}
+
 void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height) {
 #if CONFIG_DISPLAY_ENABLED
-    if (!rgba_frame) return;
+    if (!rgba_frame || width <= 0 || height <= 0) return;
+    if (width > CONFIG_MATRIX_WIDTH) width = CONFIG_MATRIX_WIDTH;
+    if (height > CONFIG_MATRIX_HEIGHT) height = CONFIG_MATRIX_HEIGHT;
 
     // Bulk transfer entire frame using RGB888_32 with BGR order (little-endian)
     // RGBA layout [R,G,B,A] matches BGR little-endian which reads r=p[0], g=p[1], b=p[2]
