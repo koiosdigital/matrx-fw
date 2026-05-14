@@ -353,7 +353,7 @@ namespace {
         cfg.client_ds_data = static_ds_data_ctx;
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
         cfg.reconnect_timeout_ms = 2500;
-        cfg.network_timeout_ms = 2500;
+        cfg.network_timeout_ms = 10000;
 
         cfg.enable_close_reconnect = true;
 
