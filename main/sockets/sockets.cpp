@@ -104,6 +104,10 @@ namespace {
 
     int sock_failure_count = 0;
     int wifi_disconnect_count = 0;
+    // WS dispatches ERROR + DISCONNECTED in sequence on a failed connect;
+    // this flag dedupes them so we count one failure and schedule one reconnect.
+    // Cleared when a new client is started in start_client().
+    bool disconnect_handled = false;
 
     // Forward declarations
     void try_advance_state();
@@ -119,9 +123,10 @@ namespace {
     char* static_cert = nullptr;
     size_t static_cert_len = 0;
 
-    // Reconnect timer
+    // Reconnect timer (also used to delay first connect so kd_ota boot check
+    // can complete its HTTPS handshake without competing for mbedtls SRAM)
     esp_timer_handle_t reconnect_timer = nullptr;
-    constexpr int64_t RECONNECT_DELAY_US = 2000 * 1000;  // 2 seconds
+    constexpr int64_t RECONNECT_DELAY_US = 3000 * 1000;  // 3 seconds
 
     // Schedule retry timer (exponential backoff: 10s, 20s, 30s, 30s, ...)
     esp_timer_handle_t schedule_retry_timer = nullptr;
@@ -223,39 +228,54 @@ namespace {
 
         case WEBSOCKET_EVENT_DISCONNECTED:
         case WEBSOCKET_EVENT_CLOSED:
-        case WEBSOCKET_EVENT_ERROR:
+        case WEBSOCKET_EVENT_ERROR: {
             ESP_LOGW(TAG, "Disconnected/error (event=%ld)", event_id);
             sock.rx_reset();
             esp_timer_stop(schedule_retry_timer);
-            if (sock.state == State::Connected) {
-                sock.state = State::Ready;
+
+            // WiFi gone — let the WiFi handler drive state, not us.
+            if (sock.state == State::WaitingForNetwork) break;
+            // WS dispatches ERROR and DISCONNECTED back-to-back on a failed
+            // connect; only react to the first one per session.
+            if (disconnect_handled) break;
+            disconnect_handled = true;
+
+            const bool was_connected = (sock.state == State::Connected);
+            sock.state = State::Ready;
+
+            if (was_connected) {
                 scheduler_on_disconnect();
                 show_fs_sprite("connecting");
-
-                sock_failure_count++;
-                ESP_LOGW(TAG, "Socket failure %d/%d (wifi resets: %d/%d)",
-                         sock_failure_count, MAX_SOCK_FAILURES_BEFORE_WIFI_RESET,
-                         wifi_disconnect_count, MAX_WIFI_RESETS_BEFORE_RESTART);
-
-                if (sock_failure_count >= MAX_SOCK_FAILURES_BEFORE_WIFI_RESET) {
-                    wifi_disconnect_count++;
-                    sock_failure_count = 0;
-
-                    if (wifi_disconnect_count >= MAX_WIFI_RESETS_BEFORE_RESTART) {
-                        ESP_LOGE(TAG, "Too many WiFi resets (%d), restarting",
-                                 wifi_disconnect_count);
-                        esp_restart();
-                    }
-
-                    ESP_LOGW(TAG, "Too many socket failures, disconnecting WiFi (%d/%d)",
-                             wifi_disconnect_count, MAX_WIFI_RESETS_BEFORE_RESTART);
-                    destroy_ws_client();
-                    kd_common_wifi_disconnect();
-                } else {
-                    schedule_reconnect();
-                }
             }
+
+            sock_failure_count++;
+            ESP_LOGW(TAG, "Socket failure %d/%d (wifi resets: %d/%d)",
+                     sock_failure_count, MAX_SOCK_FAILURES_BEFORE_WIFI_RESET,
+                     wifi_disconnect_count, MAX_WIFI_RESETS_BEFORE_RESTART);
+
+            if (sock_failure_count >= MAX_SOCK_FAILURES_BEFORE_WIFI_RESET) {
+                wifi_disconnect_count++;
+                sock_failure_count = 0;
+
+                if (wifi_disconnect_count >= MAX_WIFI_RESETS_BEFORE_RESTART) {
+                    ESP_LOGE(TAG, "Too many WiFi resets (%d), restarting",
+                             wifi_disconnect_count);
+                    esp_restart();
+                }
+
+                ESP_LOGW(TAG, "Too many socket failures, disconnecting WiFi (%d/%d)",
+                         wifi_disconnect_count, MAX_WIFI_RESETS_BEFORE_RESTART);
+                // Don't destroy client here — we're running on the WS task and
+                // esp_websocket_client_destroy refuses to stop from its own task.
+                // The reconnect_timer (esp_timer task) destroys safely.
+                kd_common_wifi_disconnect();
+            }
+            // Always schedule reconnect — covers both initial-connect failures
+            // (state was Ready) and post-connect drops. With disable_auto_reconnect
+            // the WS task exits cleanly, so destroy from the timer is safe.
+            schedule_reconnect();
             break;
+        }
 
         case WEBSOCKET_EVENT_DATA:
             // Skip control frames
@@ -312,6 +332,7 @@ namespace {
             ESP_LOGW(TAG, "Client already initialized, destroying first");
             destroy_ws_client();
         }
+        disconnect_handled = false;
 
         // Initialize certificate data if not already cached
         if (static_cert == nullptr) {
@@ -352,10 +373,13 @@ namespace {
         cfg.client_cert_len = static_cert_len + 1;  // Include null terminator for PEM
         cfg.client_ds_data = static_ds_data_ctx;
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        cfg.reconnect_timeout_ms = 2500;
         cfg.network_timeout_ms = 10000;
 
-        cfg.enable_close_reconnect = true;
+        // Reconnects are owned entirely by our reconnect_timer / state machine.
+        // Letting the WS client auto-reconnect races our explicit destroy and
+        // causes use-after-free in destroy_and_free_resources.
+        cfg.disable_auto_reconnect = true;
+        cfg.enable_close_reconnect = false;
 
         sock.client = esp_websocket_client_init(&cfg);
         if (!sock.client) return ESP_FAIL;
@@ -390,7 +414,10 @@ namespace {
 
         case State::Ready:
             show_fs_sprite("connecting");
-            start_client();
+            // Route through reconnect_timer so the first connect is delayed by
+            // RECONNECT_DELAY_US — lets kd_ota's HTTPS boot check finish first
+            // and avoids two simultaneous TLS handshakes thrashing mbedtls SRAM.
+            schedule_reconnect();
             break;
 
         case State::Connected:
