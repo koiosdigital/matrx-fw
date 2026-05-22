@@ -373,7 +373,18 @@ namespace {
         cfg.client_cert_len = static_cert_len + 1;  // Include null terminator for PEM
         cfg.client_ds_data = static_ds_data_ctx;
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        cfg.network_timeout_ms = 10000;
+        cfg.network_timeout_ms = 15000;
+        cfg.buffer_size = 8192;          // match 8KB app-data chunk size
+        cfg.ping_interval_sec = 25;      // ws-level ping
+        cfg.pingpong_timeout_sec = 60;   // tear down if no pong within 60s
+
+        // TCP-level keepalive — catches half-open sockets when the peer or a
+        // middlebox drops the connection without sending FIN/RST. Without this
+        // a dead TCP socket sits idle until the next write fails.
+        cfg.keep_alive_enable = true;
+        cfg.keep_alive_idle = 30;        // start probing after 30s idle
+        cfg.keep_alive_interval = 5;     // 5s between probes
+        cfg.keep_alive_count = 3;        // declare dead after 3 missed probes
 
         // Reconnects are owned entirely by our reconnect_timer / state machine.
         // Letting the WS client auto-reconnect races our explicit destroy and
