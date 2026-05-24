@@ -208,7 +208,7 @@ namespace {
         webp_player_play_app(app, duration_ms);
         start_prepare_timer(duration_ms);
 
-        ESP_LOGI(TAG, "Playing app %02x%02x... (duration: %ums)",
+        ESP_LOGD(TAG, "Playing app %02x%02x... (duration: %ums)",
                  app->uuid[0], app->uuid[1], duration_ms);
     }
 
@@ -633,7 +633,7 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displa
         return;
     }
 
-    ESP_LOGI(TAG, "Render response: %02x%02x... success=%d displayable=%d",
+    ESP_LOGD(TAG, "Render response: %02x%02x... success=%d displayable=%d",
              uuid[0], uuid[1], success, displayable);
 
     if (!success) {

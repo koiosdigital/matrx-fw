@@ -144,7 +144,7 @@ namespace {
         ctx.frame_count = ctx.anim_info.frame_count;
         xSemaphoreGive(ctx.decoder_mutex);
 
-        ESP_LOGI(TAG, "Decoder created: %u frames, %ux%u",
+        ESP_LOGD(TAG, "Decoder created: %u frames, %ux%u",
             ctx.frame_count, ctx.anim_info.canvas_width, ctx.anim_info.canvas_height);
         return ESP_OK;
     }
@@ -204,7 +204,7 @@ namespace {
 
             ctx.webp_bytes = ctx.webp_buffer;
             ctx.loaded_source_type = WEBP_SOURCE_RAM;
-            ESP_LOGI(TAG, "Loaded RAM app (%zu bytes)", ctx.webp_size);
+            ESP_LOGD(TAG, "Loaded RAM app (%zu bytes)", ctx.webp_size);
         }
 
         return ESP_OK;
@@ -274,7 +274,7 @@ namespace {
         ctx.state.store(State::PLAYING);
 
         emit_playing_event();
-        ESP_LOGI(TAG, "Playback started: %s, duration %u ms",
+        ESP_LOGD(TAG, "Playback started: %s, duration %u ms",
             ctx.source_type == WEBP_SOURCE_RAM ? "RAM app" : ctx.embedded_name,
             ctx.duration_ms);
 
@@ -481,7 +481,7 @@ namespace {
             if (check_duration_expired()) {
                 emit_stopped_event();
                 goto_idle();
-                ESP_LOGI(TAG, "Duration expired");
+                ESP_LOGD(TAG, "Duration expired");
                 continue;
             }
 

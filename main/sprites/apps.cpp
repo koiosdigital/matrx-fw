@@ -299,7 +299,7 @@ bool app_transfer_start(App_t* app, size_t total_size, uint32_t total_chunks, co
         std::memset(app->transfer.expected_sha256, 0, 32);
     }
 
-    ESP_LOGI(TAG, "Transfer started: %zu bytes in %u chunks", total_size, total_chunks);
+    ESP_LOGD(TAG, "Transfer started: %zu bytes in %u chunks", total_size, total_chunks);
     return true;
 }
 
@@ -399,7 +399,7 @@ bool app_transfer_finalize(App_t* app) {
     app->transfer.total_chunks = 0;
     app->transfer.chunks_received = 0;
 
-    ESP_LOGI(TAG, "Transfer finalized: %zu bytes, SHA256 verified", app->len);
+    ESP_LOGD(TAG, "Transfer finalized: %zu bytes, SHA256 verified", app->len);
     return true;
 }
 

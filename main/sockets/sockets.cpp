@@ -296,7 +296,7 @@ namespace {
                     break;
                 }
                 sock.rx_expected = data->payload_len;
-                ESP_LOGI(TAG, "RX: %d bytes", data->payload_len);
+                ESP_LOGD(TAG, "RX: %d bytes", data->payload_len);
             }
 
             // Append chunk

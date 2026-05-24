@@ -38,7 +38,7 @@ namespace {
         if (response == nullptr) return;
         if (!validate_uuid(response->app_uuid, "render response")) return;
 
-        ESP_LOGI(TAG, "RX render response: uuid=...%02x%02x, displayable=%d, size=%u, chunks=%u",
+        ESP_LOGD(TAG, "RX render response: uuid=...%02x%02x, displayable=%d, size=%u, chunks=%u",
                  response->app_uuid.data[14], response->app_uuid.data[15],
                  response->displayable, response->total_size, response->total_chunks);
 
@@ -75,7 +75,7 @@ namespace {
             return;
         }
 
-        ESP_LOGI(TAG, "App render response: %u bytes in %u chunks",
+        ESP_LOGD(TAG, "App render response: %u bytes in %u chunks",
                  response->total_size, response->total_chunks);
 
         if (!app_transfer_start(app, response->total_size, response->total_chunks,
@@ -90,7 +90,7 @@ namespace {
         if (chunk == nullptr) return;
         if (!validate_uuid(chunk->app_uuid, "chunk")) return;
 
-        ESP_LOGI(TAG, "RX chunk: idx=%u, len=%zu, uuid=...%02x%02x",
+        ESP_LOGD(TAG, "RX chunk: idx=%u, len=%zu, uuid=...%02x%02x",
                  chunk->chunk_index, chunk->data.len,
                  chunk->app_uuid.data[14], chunk->app_uuid.data[15]);
 
@@ -124,7 +124,7 @@ namespace {
             bool success = app_transfer_finalize(app);
             scheduler_on_render_response(app->uuid, success, app->displayable);
             if (success) {
-                ESP_LOGI(TAG, "App data transfer complete");
+                ESP_LOGD(TAG, "App data transfer complete");
             }
         }
     }
