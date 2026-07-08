@@ -139,8 +139,11 @@ bool GdmaDma::init() {
   // Both 6.0 betas report ESP_IDF_VERSION as 6.0.0, so we use __has_include to detect
   // the beta2 API change (soc/gdma_channel.h was removed in the same refactor).
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0) && !__has_include("soc/gdma_channel.h")
-  // ESP-IDF >= 6.0-beta2: simplified config, direction via NULL parameter
-  gdma_channel_alloc_config_t dma_alloc_config = {.flags = {.isr_cache_safe = 0}};
+  // ESP-IDF >= 6.0-beta2: simplified config, direction via NULL parameter.
+  // Value-init: intr_priority = 0 (driver picks a low default), isr_cache_safe = 0.
+  // IDF 6.1 added intr_priority, so a partial designated initializer trips
+  // -Werror=missing-field-initializers.
+  gdma_channel_alloc_config_t dma_alloc_config = {};
   esp_err_t err = gdma_new_ahb_channel(&dma_alloc_config, &dma_chan_, nullptr);
 
 #elif ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
