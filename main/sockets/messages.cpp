@@ -94,6 +94,7 @@ void msg_send_claim_if_needed() {
     if (token == nullptr) return;
 
     if (kd_common_get_claim_token(reinterpret_cast<char*>(token), &token_len) != ESP_OK || token_len == 0) {
+        ESP_LOGE(TAG, "Claim required but failed to retrieve token");
         heap_caps_free(token);
         return;
     }
