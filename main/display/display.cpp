@@ -141,53 +141,6 @@ namespace {
         heap_caps_free(display_buffer);
     }
 
-#ifdef CONFIG_KD_COMMON_CONSOLE_ENABLE
-    int cmd_matrix(int argc, char** argv) {
-        if (argc == 3 && strcmp(argv[1], "drive") == 0) {
-            int level = atoi(argv[2]);
-            if (level < 0 || level > 3) {
-                printf("usage: matrix drive <0-3>\n");
-                return 1;
-            }
-            const int pins[] = {
-                display_cfg.pins.r1, display_cfg.pins.g1, display_cfg.pins.b1,
-                display_cfg.pins.r2, display_cfg.pins.g2, display_cfg.pins.b2,
-                display_cfg.pins.a, display_cfg.pins.b, display_cfg.pins.c,
-                display_cfg.pins.d, display_cfg.pins.e,
-                display_cfg.pins.lat, display_cfg.pins.oe, display_cfg.pins.clk,
-            };
-            for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
-                if (pins[i] >= 0) {
-                    gpio_set_drive_capability((gpio_num_t)pins[i], (gpio_drive_cap_t)level);
-                }
-            }
-            printf("matrix drive %d applied to %zu pins (until 'matrix on' or reboot)\n",
-                level, sizeof(pins) / sizeof(pins[0]));
-            return 0;
-        }
-        if (argc != 2 || (strcmp(argv[1], "on") != 0 && strcmp(argv[1], "off") != 0)) {
-            printf("usage: matrix <on|off> | matrix drive <0-3>\n");
-            return 1;
-        }
-        bool on = (strcmp(argv[1], "on") == 0);
-        if (on == dma_display.is_running()) {
-            printf("matrix already %s\n", argv[1]);
-            return 0;
-        }
-        if (on) {
-            dma_display.begin();
-            dma_display.set_brightness(32);
-            printf("matrix on (content resumes on next sprite/rotation; reboot for full restore)\n");
-        } else {
-            webp_player_stop();
-            vTaskDelay(pdMS_TO_TICKS(250));
-            dma_display.end();
-            printf("matrix off — HUB75 DMA stopped, panel pins static\n");
-        }
-        return 0;
-    }
-#endif  // CONFIG_KD_COMMON_CONSOLE_ENABLE
-
     void ble_event_handler(void*, esp_event_base_t, int32_t event_id, void*) {
         if (event_id == PROTOCOMM_TRANSPORT_BLE_CONNECTED) {
             display_pop_code();
@@ -239,14 +192,6 @@ void display_init() {
         prov_event_handler, nullptr);
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START,
         wifi_event_handler, nullptr);
-}
-
-void display_register_console_cmds() {
-#if CONFIG_DISPLAY_ENABLED && defined(CONFIG_KD_COMMON_CONSOLE_ENABLE)
-    kd_console_register_cmd("matrix",
-        "matrix <on|off> | matrix drive <0-3> - HUB75 DMA stop/start, GPIO drive strength (EMI testing)",
-        cmd_matrix);
-#endif
 }
 
 void display_deinit() {

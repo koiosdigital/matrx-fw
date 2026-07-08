@@ -82,8 +82,6 @@ extern "C" void app_main(void)
 
     kd_common_init();
 
-    display_register_console_cmds();
-
     apps_init();
 
     scheduler_init();
