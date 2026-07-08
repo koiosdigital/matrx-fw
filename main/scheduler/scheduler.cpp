@@ -1,4 +1,3 @@
-// Scheduler - FSM-based app schedule management
 #include "scheduler.h"
 
 #include <cstring>
@@ -15,6 +14,7 @@
 #include "webp_player.h"
 #include "display.h"
 #include "messages.h"
+#include "render_fetch.h"
 #include "sockets.h"
 #include "daughterboard.h"
 
@@ -22,66 +22,34 @@ static const char* TAG = "scheduler";
 
 namespace {
 
-    //--------------------------------------------------------------------------
-    // Constants
-    //--------------------------------------------------------------------------
-
-    constexpr int64_t RETRY_INTERVAL_US = 10 * 1000 * 1000;   // 10 seconds
-    constexpr int64_t PREPARE_BEFORE_US = 2 * 1000 * 1000;    // 2 seconds before duration ends
-
-    //--------------------------------------------------------------------------
-    // State Machine
-    //--------------------------------------------------------------------------
+    constexpr int64_t RETRY_INTERVAL_US = 10 * 1000 * 1000;
+    constexpr int64_t PREPARE_BEFORE_US = 2 * 1000 * 1000;
 
     enum class State {
-        IDLE,              // Not playing (stopped, disconnected, awaiting, empty)
-        ROTATING_PLAYING,  // Playing app in rotation
-        ROTATING_WAITING,  // Waiting for data in rotation
-        SINGLE_PLAYING,    // Playing pinned app
-        SINGLE_BLANK,      // Pinned app not displayable
+        IDLE,
+        ROTATING_PLAYING,
+        ROTATING_WAITING,
+        SINGLE_PLAYING,
+        SINGLE_BLANK,
     };
-
-    const char* state_name(State s) {
-        switch (s) {
-            case State::IDLE:             return "IDLE";
-            case State::ROTATING_PLAYING: return "ROTATING_PLAYING";
-            case State::ROTATING_WAITING: return "ROTATING_WAITING";
-            case State::SINGLE_PLAYING:   return "SINGLE_PLAYING";
-            case State::SINGLE_BLANK:     return "SINGLE_BLANK";
-        }
-        return "UNKNOWN";
-    }
-
-    //--------------------------------------------------------------------------
-    // Context
-    //--------------------------------------------------------------------------
 
     struct Context {
         State state = State::IDLE;
         size_t current_idx = 0;
-        App_t* pinned_app = nullptr;       // Non-null when in single mode
+        App_t* pinned_app = nullptr;
         esp_timer_handle_t prepare_timer = nullptr;
         esp_timer_handle_t retry_timer = nullptr;
-        uint32_t playback_start_ms = 0;    // When current app started
+        uint32_t playback_start_ms = 0;
         SemaphoreHandle_t mutex = nullptr;
     };
 
     Context ctx;
 
-    //--------------------------------------------------------------------------
-    // State Transition
-    //--------------------------------------------------------------------------
-
     void transition_to(State new_state) {
         if (ctx.state != new_state) {
-            ESP_LOGI(TAG, "State: %s -> %s", state_name(ctx.state), state_name(new_state));
             ctx.state = new_state;
         }
     }
-
-    //--------------------------------------------------------------------------
-    // Timer Management
-    //--------------------------------------------------------------------------
 
     void stop_timers() {
         if (ctx.retry_timer) {
@@ -104,7 +72,7 @@ namespace {
 
     void start_prepare_timer(uint32_t duration_ms) {
         if (!ctx.prepare_timer) return;
-        if (duration_ms <= 2000) return;  // Too short for prepare phase
+        if (duration_ms <= 2000) return;
 
         esp_timer_stop(ctx.prepare_timer);
         int64_t delay_us = static_cast<int64_t>(duration_ms - 2000) * 1000;
@@ -114,14 +82,9 @@ namespace {
         }
     }
 
-    //--------------------------------------------------------------------------
-    // Helpers
-    //--------------------------------------------------------------------------
-
     void request_render(App_t* app) {
         if (!app) return;
-        msg_request_app_render(app);
-        ESP_LOGD(TAG, "Requested render for %02x%02x...", app->uuid[0], app->uuid[1]);
+        render_fetch_request(app->uuid);
     }
 
     App_t* find_pinned_app() {
@@ -135,7 +98,6 @@ namespace {
         return nullptr;
     }
 
-    // Find next qualified app (has data, displayable, not skipped)
     int find_next_qualified(size_t from_idx, bool skip_current) {
         size_t count = apps_count();
         if (count == 0) return -1;
@@ -151,7 +113,6 @@ namespace {
         return -1;
     }
 
-    // Find next non-skipped app (may not have data)
     int find_next_non_skipped(size_t from_idx, bool skip_current) {
         size_t count = apps_count();
         if (count == 0) return -1;
@@ -167,7 +128,6 @@ namespace {
         return -1;
     }
 
-    // Request renders for next N non-skipped apps
     void prefetch_renders(size_t from_idx, size_t count_to_request) {
         size_t total = apps_count();
         size_t requested = 0;
@@ -180,16 +140,11 @@ namespace {
                 requested++;
             }
         }
-        ESP_LOGD(TAG, "Prefetched %zu renders", requested);
     }
 
     uint32_t now_ms() {
         return static_cast<uint32_t>(esp_timer_get_time() / 1000);
     }
-
-    //--------------------------------------------------------------------------
-    // Playback Actions
-    //--------------------------------------------------------------------------
 
     void show_ready() {
         webp_player_play_embedded("ready");
@@ -207,14 +162,7 @@ namespace {
 
         webp_player_play_app(app, duration_ms);
         start_prepare_timer(duration_ms);
-
-        ESP_LOGD(TAG, "Playing app %02x%02x... (duration: %ums)",
-                 app->uuid[0], app->uuid[1], duration_ms);
     }
-
-    //--------------------------------------------------------------------------
-    // State Actions
-    //--------------------------------------------------------------------------
 
     void enter_idle() {
         stop_timers();
@@ -249,7 +197,6 @@ namespace {
         ctx.current_idx = idx;
         ctx.pinned_app = nullptr;
 
-        // Request render for current and start retry timer
         request_render(app);
         start_retry_timer();
         show_ready();
@@ -287,23 +234,16 @@ namespace {
         transition_to(State::SINGLE_BLANK);
     }
 
-    //--------------------------------------------------------------------------
-    // Schedule Evaluation
-    //--------------------------------------------------------------------------
-
     void evaluate_schedule() {
         size_t count = apps_count();
 
         if (count == 0) {
-            ESP_LOGI(TAG, "Empty schedule");
             enter_idle();
             return;
         }
 
-        // Check for pinned app first
         App_t* pinned = find_pinned_app();
         if (pinned) {
-            ESP_LOGI(TAG, "Found pinned app");
             if (app_is_qualified(pinned)) {
                 enter_single_playing(pinned);
             } else {
@@ -312,11 +252,9 @@ namespace {
             return;
         }
 
-        // Single app in schedule - use single mode (blank when not displayable)
         if (count == 1) {
             App_t* app = apps_get_by_index(0);
             if (app && !app->skipped) {
-                ESP_LOGI(TAG, "Single app mode");
                 if (app_is_qualified(app)) {
                     enter_single_playing(app);
                 } else {
@@ -326,28 +264,21 @@ namespace {
             }
         }
 
-        // Rotating mode - find first qualified
         int idx = find_next_qualified(0, false);
         if (idx >= 0) {
             enter_rotating_playing(static_cast<size_t>(idx));
             return;
         }
 
-        // No qualified - find first non-skipped and wait for data
         idx = find_next_non_skipped(0, false);
         if (idx >= 0) {
             enter_rotating_waiting(static_cast<size_t>(idx));
             return;
         }
 
-        // All apps skipped
         ESP_LOGW(TAG, "All apps are skipped");
         enter_idle();
     }
-
-    //--------------------------------------------------------------------------
-    // Advance Logic (Rotating Mode)
-    //--------------------------------------------------------------------------
 
     void advance_to_next() {
         if (ctx.state != State::ROTATING_PLAYING && ctx.state != State::ROTATING_WAITING) {
@@ -360,16 +291,13 @@ namespace {
             return;
         }
 
-        // Find next qualified app
         int next = find_next_qualified(ctx.current_idx, true);
 
         if (next >= 0) {
             enter_rotating_playing(static_cast<size_t>(next));
         } else {
-            // No qualified app - check if current is still the only option
             int current_check = find_next_qualified(ctx.current_idx, false);
             if (current_check >= 0 && static_cast<size_t>(current_check) == ctx.current_idx) {
-                // Current is still qualified - replay it
                 App_t* app = apps_get_by_index(ctx.current_idx);
                 if (app) {
                     play_app(app);
@@ -378,30 +306,21 @@ namespace {
                 }
             }
 
-            // Find any non-skipped to wait on
             next = find_next_non_skipped(ctx.current_idx, true);
             if (next >= 0) {
                 enter_rotating_waiting(static_cast<size_t>(next));
             } else {
-                // Nothing available
                 enter_idle();
             }
         }
     }
 
-    //--------------------------------------------------------------------------
-    // Timer Callbacks
-    //--------------------------------------------------------------------------
-
     void retry_timer_callback(void*) {
         raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
         if (!lock) return;
 
-        ESP_LOGI(TAG, "Retry timer fired");
-
         switch (ctx.state) {
             case State::ROTATING_WAITING: {
-                // Re-request renders for non-skipped apps
                 size_t count = apps_count();
                 for (size_t i = 0; i < count; i++) {
                     App_t* app = apps_get_by_index(i);
@@ -410,7 +329,6 @@ namespace {
                     }
                 }
 
-                // Check if any became qualified
                 int idx = find_next_qualified(0, false);
                 if (idx >= 0) {
                     enter_rotating_playing(static_cast<size_t>(idx));
@@ -437,16 +355,12 @@ namespace {
         raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
         if (!lock) return;
 
-        ESP_LOGD(TAG, "Prepare timer fired");
-
         switch (ctx.state) {
             case State::ROTATING_PLAYING:
-                // Request renders for next 2 apps
                 prefetch_renders(ctx.current_idx, 2);
                 break;
 
             case State::SINGLE_PLAYING:
-                // Request render for same app (refresh)
                 if (ctx.pinned_app) {
                     request_render(ctx.pinned_app);
                 }
@@ -457,28 +371,21 @@ namespace {
         }
     }
 
-    //--------------------------------------------------------------------------
-    // WebP Player Event Handlers
-    //--------------------------------------------------------------------------
-
     void on_playing(const webp_player_playing_evt_t* evt) {
         if (!evt) return;
 
-        // Send "currently displaying" message for RAM apps
         if (evt->source_type == WEBP_SOURCE_RAM && evt->ram_app) {
             msg_send_currently_displaying(evt->ram_app);
         }
     }
 
     void on_stopped() {
-        // Duration expired - decide what to do next
         switch (ctx.state) {
             case State::ROTATING_PLAYING:
                 advance_to_next();
                 break;
 
             case State::SINGLE_PLAYING:
-                // Replay the pinned app
                 if (ctx.pinned_app && app_is_qualified(ctx.pinned_app)) {
                     play_app(ctx.pinned_app);
                 } else if (ctx.pinned_app) {
@@ -528,14 +435,9 @@ namespace {
 
 }  // namespace
 
-//------------------------------------------------------------------------------
-// Public API
-//------------------------------------------------------------------------------
-
 void scheduler_init() {
     ctx.mutex = xSemaphoreCreateMutex();
 
-    // Create retry timer
     esp_timer_create_args_t retry_args = {
         .callback = retry_timer_callback,
         .arg = nullptr,
@@ -545,7 +447,6 @@ void scheduler_init() {
     };
     esp_timer_create(&retry_args, &ctx.retry_timer);
 
-    // Create prepare timer
     esp_timer_create_args_t prepare_args = {
         .callback = prepare_timer_callback,
         .arg = nullptr,
@@ -555,7 +456,6 @@ void scheduler_init() {
     };
     esp_timer_create(&prepare_args, &ctx.prepare_timer);
 
-    // Register for webp_player events
     esp_event_handler_register(
         WEBP_PLAYER_EVENTS,
         ESP_EVENT_ANY_ID,
@@ -563,7 +463,6 @@ void scheduler_init() {
         nullptr
     );
 
-    // Register for button events (A = prev, C = next)
     esp_event_handler_register(
         DAUGHTERBOARD_EVENTS,
         DAUGHTERBOARD_EVENT_BUTTON_A_PRESSED,
@@ -576,18 +475,13 @@ void scheduler_init() {
         [](void*, esp_event_base_t, int32_t, void*) { scheduler_next(); },
         nullptr
     );
-
-    ESP_LOGI(TAG, "Scheduler initialized");
 }
 
 void scheduler_start() {
-    ESP_LOGI(TAG, "Scheduler started");
-    // Actual work happens on connect/schedule received
 }
 
 void scheduler_stop() {
     enter_idle();
-    ESP_LOGI(TAG, "Scheduler stopped");
 }
 
 void scheduler_deinit() {
@@ -611,8 +505,6 @@ void scheduler_deinit() {
         vSemaphoreDelete(ctx.mutex);
         ctx.mutex = nullptr;
     }
-
-    ESP_LOGI(TAG, "Scheduler deinitialized");
 }
 
 bool scheduler_has_schedule() {
@@ -620,7 +512,6 @@ bool scheduler_has_schedule() {
 }
 
 void scheduler_on_schedule_received() {
-    ESP_LOGI(TAG, "Schedule received (%zu apps)", apps_count());
     evaluate_schedule();
 }
 
@@ -633,18 +524,13 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displa
         return;
     }
 
-    ESP_LOGD(TAG, "Render response: %02x%02x... success=%d displayable=%d",
-             uuid[0], uuid[1], success, displayable);
-
     if (!success) {
         ESP_LOGW(TAG, "Render failed for %02x%02x...", uuid[0], uuid[1]);
         return;
     }
 
-    // Handle based on current state
     switch (ctx.state) {
         case State::ROTATING_WAITING: {
-            // Check if any app is now qualified
             int idx = find_next_qualified(0, false);
             if (idx >= 0) {
                 enter_rotating_playing(static_cast<size_t>(idx));
@@ -653,7 +539,6 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displa
         }
 
         case State::ROTATING_PLAYING: {
-            // If current became unqualified, advance
             App_t* current = apps_get_by_index(ctx.current_idx);
             if (current && !app_is_qualified(current)) {
                 advance_to_next();
@@ -662,7 +547,6 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displa
         }
 
         case State::SINGLE_BLANK: {
-            // Check if pinned app is now qualified
             if (ctx.pinned_app && app_is_qualified(ctx.pinned_app)) {
                 enter_single_playing(ctx.pinned_app);
             }
@@ -670,7 +554,6 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displa
         }
 
         case State::SINGLE_PLAYING: {
-            // If pinned app became not displayable, go to blank
             if (ctx.pinned_app && !displayable) {
                 enter_single_blank(ctx.pinned_app);
             }
@@ -685,15 +568,11 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displa
 void scheduler_on_pin_state_changed(const uint8_t* uuid, bool pinned) {
     if (!uuid) return;
 
-    ESP_LOGI(TAG, "Pin state changed: %02x%02x... pinned=%d", uuid[0], uuid[1], pinned);
-
-    // Re-evaluate the entire schedule to handle mode switch
     evaluate_schedule();
 }
 
 void scheduler_on_connect() {
     msg_send_schedule_request();
-    ESP_LOGI(TAG, "Connected - requesting schedule");
 }
 
 void scheduler_on_disconnect() {
@@ -703,7 +582,6 @@ void scheduler_on_disconnect() {
     webp_player_play_embedded("connecting");
 
     transition_to(State::IDLE);
-    ESP_LOGI(TAG, "Disconnected - showing connecting sprite");
 }
 
 const uint8_t* scheduler_get_current_uuid() {
@@ -724,7 +602,6 @@ const uint8_t* scheduler_get_current_uuid() {
 }
 
 void scheduler_next() {
-    // Only works in rotating mode
     if (ctx.state != State::ROTATING_PLAYING && ctx.state != State::ROTATING_WAITING) {
         return;
     }
@@ -735,12 +612,10 @@ void scheduler_next() {
     int next = find_next_qualified(ctx.current_idx, true);
     if (next >= 0) {
         enter_rotating_playing(static_cast<size_t>(next));
-        ESP_LOGI(TAG, "Button: next -> index %d", next);
     }
 }
 
 void scheduler_prev() {
-    // Only works in rotating mode
     if (ctx.state != State::ROTATING_PLAYING && ctx.state != State::ROTATING_WAITING) {
         return;
     }
@@ -748,13 +623,11 @@ void scheduler_prev() {
     size_t count = apps_count();
     if (count == 0) return;
 
-    // Search backwards for previous qualified
     for (size_t i = 1; i < count; i++) {
         size_t idx = (ctx.current_idx + count - i) % count;
         App_t* app = apps_get_by_index(idx);
         if (app && app_is_qualified(app)) {
             enter_rotating_playing(idx);
-            ESP_LOGI(TAG, "Button: prev -> index %zu", idx);
             return;
         }
     }

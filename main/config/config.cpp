@@ -1,4 +1,3 @@
-// System configuration - display settings with NVS persistence
 #include "config.h"
 
 #include <cstring>
@@ -103,10 +102,6 @@ esp_err_t config_init() {
 
     apply_to_display();
 
-    ESP_LOGI(TAG, "Config: enabled=%d brightness=%d auto=%d lux=%u",
-        g_config.screen_enabled, g_config.screen_brightness,
-        g_config.auto_brightness_enabled, g_config.screen_off_lux);
-
     return ESP_OK;
 }
 
@@ -130,16 +125,12 @@ esp_err_t config_set(const system_config_t* config) {
 }
 
 void perform_factory_reset(const char* reason) {
-    ESP_LOGI(TAG, "Factory reset%s%s", reason ? ": " : "", reason ? reason : "");
-
     show_fs_sprite("factory_reset_hold");
 
-    // Erase WiFi
     if (esp_wifi_restore() != ESP_OK) {
         erase_nvs_namespace("nvs.net80211");
     }
 
-    // Erase config
     erase_nvs_namespace(NVS_NAMESPACE);
 
     show_fs_sprite("factory_reset_success");

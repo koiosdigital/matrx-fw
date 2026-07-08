@@ -1,15 +1,14 @@
 #pragma once
 
-// Initialize the sockets module
+#include <stddef.h>
+
 void sockets_init();
-
-// Deinitialize and clean up
 void sockets_deinit();
-
-// Check if connected to server
 bool sockets_is_connected();
-
-// Flush outbox (send queued messages immediately)
 void sockets_flush_outbox();
+void sockets_on_schedule_received();
 
-#define SOCKETS_URL "wss://device.api.koiosdigital.net"
+char* sockets_get_device_token_copy();
+void sockets_request_token_refresh();
+
+#define SOCKETS_URL "wss://vn-sec.koios.sh"

@@ -85,13 +85,11 @@ void msg_send_claim_if_needed() {
         return;
     }
 
-    // Query actual token length first
     size_t token_len = 0;
     if (kd_common_get_claim_token(nullptr, &token_len) != ESP_OK || token_len == 0) {
         return;
     }
 
-    // Allocate only what's needed
     auto* token = static_cast<uint8_t*>(heap_caps_malloc(token_len, MALLOC_CAP_SPIRAM));
     if (token == nullptr) return;
 
@@ -111,76 +109,9 @@ void msg_send_claim_if_needed() {
     msg_queue(&msg);
     g_last_claim_ms = now;
     heap_caps_free(token);
-
-    ESP_LOGI(TAG, "Sent claim request");
 }
 
 void msg_upload_coredump() {
-    // Coredump upload temporarily disabled for RAM optimization
-    // TODO: Implement chunked streaming when re-enabling
-    /*
-    const esp_partition_t* part = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, "coredump");
-    if (part == nullptr) return;
-
-    size_t size = part->size;
-    auto* data = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM));
-    if (data == nullptr) return;
-
-    if (esp_partition_read(part, 0, data, size) != ESP_OK) {
-        free(data);
-        return;
-    }
-
-    // Check if erased (all 0xFF)
-    bool erased = true;
-    for (size_t i = 0; i < 256 && i < size; i++) {
-        if (data[i] != 0xFF) { erased = false; break; }
-    }
-
-    if (!erased) {
-        ESP_LOGI(TAG, "Uploading coredump (%zu bytes)", size);
-
-        const esp_app_desc_t* app = esp_app_get_description();
-
-        Kd__V1__UploadCoreDump upload = KD__V1__UPLOAD_CORE_DUMP__INIT;
-        upload.core_dump.data = data;
-        upload.core_dump.len = size;
-        upload.firmware_project = const_cast<char*>(app->project_name);
-        upload.firmware_version = const_cast<char*>(app->version);
-#ifdef FIRMWARE_VARIANT
-        upload.firmware_variant = const_cast<char*>(FIRMWARE_VARIANT);
-#endif
-
-        Kd__V1__MatrxMessage msg = KD__V1__MATRX_MESSAGE__INIT;
-        msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_UPLOAD_CORE_DUMP;
-        msg.upload_core_dump = &upload;
-
-        if (msg_queue(&msg)) {
-            esp_partition_erase_range(part, 0, size);
-        }
-    }
-
-    free(data);
-    */
-}
-
-void msg_request_app_render(const App_t* app) {
-    if (app == nullptr) return;
-
-    Kd__V1__AppRenderRequest req = KD__V1__APP_RENDER_REQUEST__INIT;
-    req.app_uuid.data = const_cast<uint8_t*>(app->uuid);
-    req.app_uuid.len = 16;
-
-    req.data_sha256.data = const_cast<uint8_t*>(app->sha256);
-    req.data_sha256.len = 32;
-
-    req.preferred_chunk_size = APP_TRANSFER_CHUNK_SIZE;
-
-    Kd__V1__MatrxMessage msg = KD__V1__MATRX_MESSAGE__INIT;
-    msg.message_case = KD__V1__MATRX_MESSAGE__MESSAGE_APP_RENDER_REQUEST;
-    msg.app_render_request = &req;
-    msg_queue(&msg);
 }
 
 void msg_send_currently_displaying(const App_t* app) {

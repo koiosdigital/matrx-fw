@@ -15,6 +15,7 @@
 #include "display.h"
 #include "webp_player.h"
 #include "sockets.h"
+#include "render_fetch.h"
 #include "apps.h"
 #include "scheduler.h"
 #include "daughterboard.h"
@@ -31,46 +32,37 @@ extern "C" void app_main(void)
     }
     display_init();
 
-    // Initialize WebP player after display
     esp_err_t ret;
     ret = webp_player_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize WebP player: %s", esp_err_to_name(ret));
     }
 
-    // Show boot sprite
     show_fs_sprite("boot");
     vTaskDelay(pdMS_TO_TICKS(1200));
 
-    // Initialize daughterboard (light sensor and buttons)
     ret = daughterboard_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize daughterboard: %s", esp_err_to_name(ret));
     }
 
-    // Check if factory reset buttons are pressed (handle before kd_common_init)
     bool factory_reset_requested = daughterboard_is_button_pressed(0) && daughterboard_is_button_pressed(2);
 
-    // Handle factory reset BEFORE kd_common_init
     if (factory_reset_requested) {
-        ESP_LOGI(TAG, "Factory reset buttons detected, showing hold sprite");
         show_fs_sprite("factory_reset_hold");
 
-        // Initialize NVS manually before factory reset
         ret = nvs_flash_init();
         if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
             nvs_flash_erase();
             ret = nvs_flash_init();
         }
 
-        // Wait for 3 seconds while buttons are held
         int hold_duration_ms = 0;
         const int required_hold_ms = 3000;
         const int check_interval_ms = 100;
 
         while (hold_duration_ms < required_hold_ms) {
             if (!daughterboard_is_button_pressed(0) || !daughterboard_is_button_pressed(2)) {
-                ESP_LOGD(TAG, "Buttons released before 3 seconds, restarting");
                 vTaskDelay(pdMS_TO_TICKS(100));
                 esp_restart();
             }
@@ -78,11 +70,9 @@ extern "C" void app_main(void)
             hold_duration_ms += check_interval_ms;
         }
 
-        // Perform factory reset (WiFi not initialized yet, will use NVS fallback)
         perform_factory_reset("button hold");
     }
 
-    // Show keygen sprite if key generation will occur
 #ifdef CONFIG_KD_COMMON_ENABLE_CRYPTO
     if (kd_common_crypto_will_generate_key()) {
         show_fs_sprite("keygen");
@@ -92,19 +82,19 @@ extern "C" void app_main(void)
 
     kd_common_init();
 
-    // Initialize app manager
+    display_register_console_cmds();
+
     apps_init();
 
-    // Initialize scheduler (registers event handlers)
     scheduler_init();
     scheduler_start();
 
-    // Initialize config module after kd_common_init (which initializes NVS)
     ret = config_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize config module: %s", esp_err_to_name(ret));
     }
 
+    render_fetch_init();
     sockets_init();
 
     vTaskDelete(nullptr);

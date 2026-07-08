@@ -1,4 +1,3 @@
-// Display - Pure hardware layer for HUB75 LED matrix
 #include "display.h"
 #include "sdkconfig.h"
 #include "webp_player.h"
@@ -13,9 +12,13 @@
 #include <protocomm_ble.h>
 
 #include <kd_common.h>
+#include <kd_console.h>
 #include <esp_heap_caps.h>
+#include <driver/gpio.h>
 
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 #include "sockets.h"
 #include "hub75.h"
@@ -44,25 +47,24 @@ namespace {
             .oe = CONFIG_OE_PIN,
             .clk = CONFIG_CLK_PIN
         },
+        .gpio_drive_strength = 1,
     };
 
     Hub75Driver dma_display(display_cfg);
 
-    // Timing constants
     constexpr TickType_t BOOT_SPRITE_DELAY_MS = 1200;
 
-    // Simple 5x7 monospaced font for digits 0-9
     constexpr uint8_t font_5x7[][7] = {
-        {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}, // 0
-        {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}, // 1
-        {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}, // 2
-        {0x0E, 0x11, 0x01, 0x0E, 0x01, 0x11, 0x0E}, // 3
-        {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}, // 4
-        {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}, // 5
-        {0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E}, // 6
-        {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}, // 7
-        {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}, // 8
-        {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E}, // 9
+        {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E},
+        {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E},
+        {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F},
+        {0x0E, 0x11, 0x01, 0x0E, 0x01, 0x11, 0x0E},
+        {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02},
+        {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E},
+        {0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E},
+        {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08},
+        {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E},
+        {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E},
     };
 
     void draw_char_scaled(uint8_t* buffer, int buf_width, int buf_height, char c,
@@ -103,7 +105,6 @@ namespace {
             return;
         }
 
-        // Stop the WebP player before displaying raw buffer
         webp_player_stop();
 
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -120,7 +121,6 @@ namespace {
         }
         std::memset(display_buffer, 0, buffer_size);
 
-        // Layout: 6 chars * 5px + 5 gaps * 2px = 40px, centered in 64px width
         size_t token_len = std::strlen(pop_token);
         constexpr int scale = 1;
         constexpr int char_width = 5 * scale;
@@ -139,18 +139,61 @@ namespace {
 
         display_render_rgb_buffer(display_buffer, buffer_size);
         heap_caps_free(display_buffer);
-
-        ESP_LOGI(TAG, "Displaying POP code: %s", pop_token);
     }
 
-    // Event handlers for provisioning display states
+#ifdef CONFIG_KD_COMMON_CONSOLE_ENABLE
+    int cmd_matrix(int argc, char** argv) {
+        if (argc == 3 && strcmp(argv[1], "drive") == 0) {
+            int level = atoi(argv[2]);
+            if (level < 0 || level > 3) {
+                printf("usage: matrix drive <0-3>\n");
+                return 1;
+            }
+            const int pins[] = {
+                display_cfg.pins.r1, display_cfg.pins.g1, display_cfg.pins.b1,
+                display_cfg.pins.r2, display_cfg.pins.g2, display_cfg.pins.b2,
+                display_cfg.pins.a, display_cfg.pins.b, display_cfg.pins.c,
+                display_cfg.pins.d, display_cfg.pins.e,
+                display_cfg.pins.lat, display_cfg.pins.oe, display_cfg.pins.clk,
+            };
+            for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+                if (pins[i] >= 0) {
+                    gpio_set_drive_capability((gpio_num_t)pins[i], (gpio_drive_cap_t)level);
+                }
+            }
+            printf("matrix drive %d applied to %zu pins (until 'matrix on' or reboot)\n",
+                level, sizeof(pins) / sizeof(pins[0]));
+            return 0;
+        }
+        if (argc != 2 || (strcmp(argv[1], "on") != 0 && strcmp(argv[1], "off") != 0)) {
+            printf("usage: matrix <on|off> | matrix drive <0-3>\n");
+            return 1;
+        }
+        bool on = (strcmp(argv[1], "on") == 0);
+        if (on == dma_display.is_running()) {
+            printf("matrix already %s\n", argv[1]);
+            return 0;
+        }
+        if (on) {
+            dma_display.begin();
+            dma_display.set_brightness(32);
+            printf("matrix on (content resumes on next sprite/rotation; reboot for full restore)\n");
+        } else {
+            webp_player_stop();
+            vTaskDelay(pdMS_TO_TICKS(250));
+            dma_display.end();
+            printf("matrix off — HUB75 DMA stopped, panel pins static\n");
+        }
+        return 0;
+    }
+#endif  // CONFIG_KD_COMMON_CONSOLE_ENABLE
+
     void ble_event_handler(void*, esp_event_base_t, int32_t event_id, void*) {
         if (event_id == PROTOCOMM_TRANSPORT_BLE_CONNECTED) {
             display_pop_code();
         }
         else if (event_id == PROTOCOMM_TRANSPORT_BLE_DISCONNECTED) {
             if (!kd_common_is_wifi_connected()) {
-                ESP_LOGI(TAG, "BLE disconnected during provisioning, showing setup sprite");
                 webp_player_play_embedded("setup");
             }
         }
@@ -161,7 +204,6 @@ namespace {
             webp_player_play_embedded("setup");
         }
         else if (event_id == NETWORK_PROV_END) {
-            // Don't show connecting if already connected to websocket
             if (sockets_is_connected()) return;
 
             wifi_config_t wifi_cfg;
@@ -184,10 +226,6 @@ namespace {
 
 }  // namespace
 
-//------------------------------------------------------------------------------
-// Public API
-//------------------------------------------------------------------------------
-
 void display_init() {
 #if CONFIG_DISPLAY_ENABLED
     dma_display.begin();
@@ -201,16 +239,20 @@ void display_init() {
         prov_event_handler, nullptr);
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START,
         wifi_event_handler, nullptr);
+}
 
-    ESP_LOGI(TAG, "Display initialized");
+void display_register_console_cmds() {
+#if CONFIG_DISPLAY_ENABLED && defined(CONFIG_KD_COMMON_CONSOLE_ENABLE)
+    kd_console_register_cmd("matrix",
+        "matrix <on|off> | matrix drive <0-3> - HUB75 DMA stop/start, GPIO drive strength (EMI testing)",
+        cmd_matrix);
+#endif
 }
 
 void display_deinit() {
     esp_event_handler_unregister(PROTOCOMM_TRANSPORT_BLE_EVENT, ESP_EVENT_ANY_ID, ble_event_handler);
     esp_event_handler_unregister(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, prov_event_handler);
     esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_START, wifi_event_handler);
-
-    ESP_LOGI(TAG, "Display deinitialized");
 }
 
 void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height) {
@@ -219,10 +261,20 @@ void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height)
     if (width > CONFIG_MATRIX_WIDTH) width = CONFIG_MATRIX_WIDTH;
     if (height > CONFIG_MATRIX_HEIGHT) height = CONFIG_MATRIX_HEIGHT;
 
-    // Bulk transfer entire frame using RGB888_32 with BGR order (little-endian)
-    // RGBA layout [R,G,B,A] matches BGR little-endian which reads r=p[0], g=p[1], b=p[2]
     dma_display.draw_pixels(0, 0, static_cast<uint16_t>(width), static_cast<uint16_t>(height),
         rgba_frame, Hub75PixelFormat::RGB888_32, Hub75ColorOrder::BGR);
+#endif
+}
+
+void display_render_rgba_span(const uint8_t* rgba_span, int x, int y, int width) {
+#if CONFIG_DISPLAY_ENABLED
+    if (!rgba_span || width <= 0) return;
+    if (x < 0 || y < 0 || x >= CONFIG_MATRIX_WIDTH || y >= CONFIG_MATRIX_HEIGHT) return;
+    if (x + width > CONFIG_MATRIX_WIDTH) width = CONFIG_MATRIX_WIDTH - x;
+
+    dma_display.draw_pixels(static_cast<uint16_t>(x), static_cast<uint16_t>(y),
+        static_cast<uint16_t>(width), 1,
+        rgba_span, Hub75PixelFormat::RGB888_32, Hub75ColorOrder::BGR);
 #endif
 }
 
@@ -232,7 +284,6 @@ void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
         return;
     }
 
-    // Bulk transfer entire buffer
     dma_display.draw_pixels(0, 0, CONFIG_MATRIX_WIDTH, CONFIG_MATRIX_HEIGHT,
         rgb_buffer, Hub75PixelFormat::RGB888);
 #endif
