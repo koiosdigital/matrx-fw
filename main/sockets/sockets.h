@@ -1,6 +1,12 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
+
+struct QueuedMessage {
+    uint8_t* data;
+    size_t len;
+};
 
 void sockets_init();
 void sockets_deinit();

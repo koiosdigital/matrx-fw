@@ -55,11 +55,6 @@ namespace {
         Connected,
     };
 
-    struct QueuedMessage {
-        uint8_t* data;
-        size_t len;
-    };
-
     SemaphoreHandle_t client_mutex = nullptr;
 
     struct {
