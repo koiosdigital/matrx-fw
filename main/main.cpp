@@ -11,6 +11,7 @@
 #include "esp_system.h"
 
 #include "kd_common.h"
+#include <koios/ota.h>
 
 #include "display.h"
 #include "webp_player.h"
@@ -73,14 +74,15 @@ extern "C" void app_main(void)
         perform_factory_reset("button hold");
     }
 
-#ifdef CONFIG_KD_COMMON_ENABLE_CRYPTO
+#ifdef CONFIG_KD_COMMON_CRYPTO_ENABLE
     if (kd_common_crypto_will_generate_key()) {
         show_fs_sprite("keygen");
-        kdc_heap_check_integrity("post-keygen-sprite");
     }
 #endif
 
     kd_common_init();
+
+    koios_ota_init(nullptr);
 
     apps_init();
 

@@ -5,4 +5,3 @@ dependencies:
     version: ">=6.0"
   espressif/network_provisioning:
     version: "^1.2.4"
-  espressif/esp_websocket_client: ^1.7.0

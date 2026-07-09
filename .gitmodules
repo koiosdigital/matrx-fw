@@ -9,4 +9,4 @@
 	url = https://github.com/koiosdigital/protobufs
 [submodule "components/koios_sdk"]
 	path = components/koios_sdk
-	url = /Users/aiden/Projects/Koios/koios-sdk
+	url = https://github.com/koiosdigital/koios-sdk

@@ -1,10 +1,10 @@
 #include "messages.h"
-#include "sockets.h"
 
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <kd_common.h>
+#include <koios/cloudlink.h>
 #include <kd/v1/common.pb-c.h>
 
 #include "apps.h"
@@ -14,7 +14,6 @@ static const char* TAG = "messages";
 
 namespace {
 
-    QueueHandle_t g_outbox = nullptr;
     int64_t g_last_claim_ms = 0;
 
     constexpr int64_t CLAIM_RETRY_MS = 5000;
@@ -30,12 +29,8 @@ namespace {
         msg_queue(&_m);                                          \
     } while (0)
 
-void msg_init(QueueHandle_t outbox) {
-    g_outbox = outbox;
-}
-
 bool msg_queue(const Kd__V1__MatrxMessage* message) {
-    if (message == nullptr || g_outbox == nullptr) return false;
+    if (message == nullptr) return false;
 
     size_t len = kd__v1__matrx_message__get_packed_size(message);
     auto* buf = static_cast<uint8_t*>(heap_caps_malloc(len, MALLOC_CAP_SPIRAM));
@@ -46,14 +41,12 @@ bool msg_queue(const Kd__V1__MatrxMessage* message) {
 
     kd__v1__matrx_message__pack(message, buf);
 
-    QueuedMessage msg = { buf, len };
-    if (xQueueSend(g_outbox, &msg, pdMS_TO_TICKS(100)) != pdTRUE) {
-        ESP_LOGW(TAG, "Outbox full");
-        heap_caps_free(buf);
-        return false;
+    bool ok = koios_cloudlink_send(buf, len);
+    if (!ok) {
+        ESP_LOGW(TAG, "Failed to queue message (%zu bytes)", len);
     }
-    sockets_flush_outbox();
-    return true;
+    heap_caps_free(buf);
+    return ok;
 }
 
 void msg_send_device_info() {
