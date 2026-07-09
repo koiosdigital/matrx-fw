@@ -14,3 +14,9 @@ jobs:
       idf_version: v6.1-beta1
       project_name: matrx-fw
       create_release: true
+      # Push the app image to the Koios OTA service (ota.api.koios.sh) so it
+      # can be deployed to fleets from the console.
+      ota_upload: true
+    secrets:
+      KOIOS_CLIENT_ID: ${{ secrets.KOIOS_CLIENT_ID }}
+      KOIOS_CLIENT_SECRET: ${{ secrets.KOIOS_CLIENT_SECRET }}
