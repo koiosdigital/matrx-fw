@@ -41,6 +41,7 @@ namespace {
         esp_timer_handle_t retry_timer = nullptr;
         uint32_t playback_start_ms = 0;
         SemaphoreHandle_t mutex = nullptr;
+        bool paused = false;  // quiet hours: pipeline suspended, events ignored
     };
 
     Context ctx;
@@ -235,6 +236,8 @@ namespace {
     }
 
     void evaluate_schedule() {
+        if (ctx.paused) return;
+
         size_t count = apps_count();
 
         if (count == 0) {
@@ -318,6 +321,7 @@ namespace {
     void retry_timer_callback(void*) {
         raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
         if (!lock) return;
+        if (ctx.paused) return;
 
         switch (ctx.state) {
             case State::ROTATING_WAITING: {
@@ -354,6 +358,7 @@ namespace {
     void prepare_timer_callback(void*) {
         raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
         if (!lock) return;
+        if (ctx.paused) return;
 
         switch (ctx.state) {
             case State::ROTATING_PLAYING:
@@ -380,6 +385,8 @@ namespace {
     }
 
     void on_stopped() {
+        if (ctx.paused) return;
+
         switch (ctx.state) {
             case State::ROTATING_PLAYING:
                 advance_to_next();
@@ -399,6 +406,8 @@ namespace {
     }
 
     void on_error(const webp_player_error_evt_t* evt) {
+        if (ctx.paused) return;
+
         ESP_LOGW(TAG, "Player error");
 
         switch (ctx.state) {
@@ -484,6 +493,25 @@ void scheduler_stop() {
     enter_idle();
 }
 
+void scheduler_pause() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock || ctx.paused) return;
+
+    ctx.paused = true;
+    stop_timers();
+    webp_player_stop();   // stop decoding -> player task goes idle (~0 CPU)
+    clear_screen();       // blank the framebuffer
+    transition_to(State::IDLE);
+}
+
+void scheduler_resume() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock || !ctx.paused) return;
+
+    ctx.paused = false;
+    evaluate_schedule();  // re-derive playback from the current schedule
+}
+
 void scheduler_deinit() {
     enter_idle();
 
@@ -517,6 +545,7 @@ void scheduler_on_schedule_received() {
 
 void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displayable) {
     if (!uuid) return;
+    if (ctx.paused) return;
 
     App_t* app = app_find(uuid);
     if (!app) {
@@ -579,7 +608,11 @@ void scheduler_on_disconnect() {
     stop_timers();
     ctx.pinned_app = nullptr;
 
-    webp_player_play_embedded("connecting");
+    // While paused for quiet hours the screen stays off; don't relight it with
+    // the "connecting" sprite.
+    if (!ctx.paused) {
+        webp_player_play_embedded("connecting");
+    }
 
     transition_to(State::IDLE);
 }
@@ -602,6 +635,7 @@ const uint8_t* scheduler_get_current_uuid() {
 }
 
 void scheduler_next() {
+    if (ctx.paused) return;
     if (ctx.state != State::ROTATING_PLAYING && ctx.state != State::ROTATING_WAITING) {
         return;
     }
@@ -616,6 +650,7 @@ void scheduler_next() {
 }
 
 void scheduler_prev() {
+    if (ctx.paused) return;
     if (ctx.state != State::ROTATING_PLAYING && ctx.state != State::ROTATING_WAITING) {
         return;
     }

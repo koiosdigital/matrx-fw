@@ -142,12 +142,14 @@ namespace {
         if (ab_state.screen_is_off) {
             if (ab_state.smoothed_lux >= screen_on_threshold) {
                 ab_state.screen_is_off = false;
+                config_set_ambient_screen_off(false);
             } else {
                 return;
             }
         } else {
             if (ab_state.smoothed_lux < screen_off_threshold) {
                 ab_state.screen_is_off = true;
+                config_set_ambient_screen_off(true);
                 return;
             }
         }

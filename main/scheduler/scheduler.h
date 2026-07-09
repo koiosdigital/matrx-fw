@@ -13,6 +13,12 @@ void scheduler_start(void);
 void scheduler_stop(void);
 void scheduler_deinit(void);
 
+// Suspend the render pipeline (stop decoding/drawing, blank the framebuffer)
+// and ignore schedule/timer/player events until resumed. Used by quiet hours.
+void scheduler_pause(void);
+// Leave the paused state and re-derive the correct playback from the schedule.
+void scheduler_resume(void);
+
 bool scheduler_has_schedule(void);
 
 void scheduler_on_schedule_received(void);

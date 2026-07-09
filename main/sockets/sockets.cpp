@@ -121,12 +121,8 @@ void sockets_init() {
     cfg.on_session_ready = on_session_ready;
     cfg.on_disconnect = on_disconnect;
     cfg.on_message = on_message;
-    // Hardware SKU for cloud-side OTA classification (fw.class twin report).
-    // Dev builds stay unclassified so a bench board never claims a SKU.
-    if (strcmp(FIRMWARE_VARIANT, "devel") != 0) {
-        static constexpr char kDeviceClass[] = CONFIG_IDF_TARGET "-" FIRMWARE_VARIANT;
-        cfg.device_class = kDeviceClass;
-    }
+    static constexpr char kDeviceClass[] = CONFIG_IDF_TARGET "-" FIRMWARE_VARIANT;
+    cfg.device_class = kDeviceClass;
     koios_cloudlink_init(&cfg);
 }
 

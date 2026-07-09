@@ -40,6 +40,26 @@ namespace {
         new_cfg.screen_off_lux = (cfg->screen_off_lux <= 65535)
             ? static_cast<uint16_t>(cfg->screen_off_lux) : new_cfg.screen_off_lux;
 
+        // Quiet-hours windows (is_quiet_now is device-computed and ignored here).
+        new_cfg.quiet_window_count = 0;
+        for (size_t i = 0; i < cfg->n_quiet_windows
+                 && new_cfg.quiet_window_count < MATRX_MAX_QUIET_WINDOWS; i++) {
+            const Kd__V1__MatrxQuietWindow* w = cfg->quiet_windows[i];
+            if (w == nullptr) continue;
+
+            uint8_t day_mask = static_cast<uint8_t>(w->day_mask & 0x7F);
+            if (day_mask == 0) continue;  // no active days -> drop
+
+            quiet_window_t& dst = new_cfg.quiet_windows[new_cfg.quiet_window_count];
+            dst.day_mask = day_mask;
+            dst.start_hour = (w->start_hour <= 23) ? static_cast<uint8_t>(w->start_hour) : 0;
+            dst.start_min = (w->start_min <= 59) ? static_cast<uint8_t>(w->start_min) : 0;
+            dst.end_hour = (w->end_hour <= 23) ? static_cast<uint8_t>(w->end_hour) : 0;
+            dst.end_min = (w->end_min <= 59) ? static_cast<uint8_t>(w->end_min) : 0;
+            dst.enabled = w->enabled;
+            new_cfg.quiet_window_count++;
+        }
+
         config_set(&new_cfg);
     }
 
