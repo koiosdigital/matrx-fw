@@ -81,6 +81,7 @@ extern "C" void app_main(void)
 #endif
 
     kd_common_init();
+    kd_common_set_device_info("matrx", FIRMWARE_VARIANT);
 
     koios_ota_init(nullptr);
 
