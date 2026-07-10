@@ -121,8 +121,9 @@ void sockets_init() {
     cfg.on_session_ready = on_session_ready;
     cfg.on_disconnect = on_disconnect;
     cfg.on_message = on_message;
-    static constexpr char kDeviceClass[] = CONFIG_IDF_TARGET "-" FIRMWARE_VARIANT;
-    cfg.device_class = kDeviceClass;
+    // Class (chip) and project (IDF project name) are reported by the SDK; we
+    // only supply the build variant.
+    cfg.variant = FIRMWARE_VARIANT;
     koios_cloudlink_init(&cfg);
 }
 
