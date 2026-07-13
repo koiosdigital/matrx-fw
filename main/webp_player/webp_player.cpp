@@ -85,10 +85,10 @@ namespace {
         if (!ctx.prev_frame || ctx.prev_w != disp_w || ctx.prev_h != disp_h) {
             heap_caps_free(ctx.prev_frame);
             ctx.prev_frame = static_cast<uint8_t*>(
-                heap_caps_malloc(needed, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                heap_caps_malloc(needed, MALLOC_CAP_SPIRAM));
             if (!ctx.prev_frame) {
                 ctx.prev_frame = static_cast<uint8_t*>(
-                    heap_caps_malloc(needed, MALLOC_CAP_SPIRAM));
+                    heap_caps_malloc(needed, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
             }
             ctx.prev_w = disp_w;
             ctx.prev_h = disp_h;

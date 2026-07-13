@@ -41,7 +41,7 @@ namespace {
         esp_timer_handle_t retry_timer = nullptr;
         uint32_t playback_start_ms = 0;
         SemaphoreHandle_t mutex = nullptr;
-        bool paused = false;  // quiet hours: pipeline suspended, events ignored
+        bool paused = false;
     };
 
     Context ctx;
@@ -235,13 +235,20 @@ namespace {
         transition_to(State::SINGLE_BLANK);
     }
 
+    void enter_empty_schedule() {
+        stop_timers();
+        ctx.pinned_app = nullptr;
+        show_fs_sprite("empty_schedule");
+        transition_to(State::IDLE);
+    }
+
     void evaluate_schedule() {
         if (ctx.paused) return;
 
         size_t count = apps_count();
 
         if (count == 0) {
-            enter_idle();
+            enter_empty_schedule();
             return;
         }
 
@@ -249,7 +256,8 @@ namespace {
         if (pinned) {
             if (app_is_qualified(pinned)) {
                 enter_single_playing(pinned);
-            } else {
+            }
+            else {
                 enter_single_blank(pinned);
             }
             return;
@@ -260,7 +268,8 @@ namespace {
             if (app && !app->skipped) {
                 if (app_is_qualified(app)) {
                     enter_single_playing(app);
-                } else {
+                }
+                else {
                     enter_single_blank(app);
                 }
                 return;
@@ -279,8 +288,11 @@ namespace {
             return;
         }
 
+        // Every app is schedule-skipped: an effectively empty schedule. Apps
+        // that merely have no renderable content (displayable=false) never
+        // reach here — they land in ROTATING_WAITING/SINGLE_BLANK above.
         ESP_LOGW(TAG, "All apps are skipped");
-        enter_idle();
+        enter_empty_schedule();
     }
 
     void advance_to_next() {
@@ -298,7 +310,8 @@ namespace {
 
         if (next >= 0) {
             enter_rotating_playing(static_cast<size_t>(next));
-        } else {
+        }
+        else {
             int current_check = find_next_qualified(ctx.current_idx, false);
             if (current_check >= 0 && static_cast<size_t>(current_check) == ctx.current_idx) {
                 App_t* app = apps_get_by_index(ctx.current_idx);
@@ -312,7 +325,8 @@ namespace {
             next = find_next_non_skipped(ctx.current_idx, true);
             if (next >= 0) {
                 enter_rotating_waiting(static_cast<size_t>(next));
-            } else {
+            }
+            else {
                 enter_idle();
             }
         }
@@ -324,34 +338,35 @@ namespace {
         if (ctx.paused) return;
 
         switch (ctx.state) {
-            case State::ROTATING_WAITING: {
-                size_t count = apps_count();
-                for (size_t i = 0; i < count; i++) {
-                    App_t* app = apps_get_by_index(i);
-                    if (app && !app->skipped) {
-                        request_render(app);
-                    }
+        case State::ROTATING_WAITING: {
+            size_t count = apps_count();
+            for (size_t i = 0; i < count; i++) {
+                App_t* app = apps_get_by_index(i);
+                if (app && !app->skipped) {
+                    request_render(app);
                 }
-
-                int idx = find_next_qualified(0, false);
-                if (idx >= 0) {
-                    enter_rotating_playing(static_cast<size_t>(idx));
-                } else {
-                    start_retry_timer();
-                }
-                break;
             }
 
-            case State::SINGLE_BLANK: {
-                if (ctx.pinned_app) {
-                    request_render(ctx.pinned_app);
-                }
+            int idx = find_next_qualified(0, false);
+            if (idx >= 0) {
+                enter_rotating_playing(static_cast<size_t>(idx));
+            }
+            else {
                 start_retry_timer();
-                break;
             }
+            break;
+        }
 
-            default:
-                break;
+        case State::SINGLE_BLANK: {
+            if (ctx.pinned_app) {
+                request_render(ctx.pinned_app);
+            }
+            start_retry_timer();
+            break;
+        }
+
+        default:
+            break;
         }
     }
 
@@ -361,18 +376,18 @@ namespace {
         if (ctx.paused) return;
 
         switch (ctx.state) {
-            case State::ROTATING_PLAYING:
-                prefetch_renders(ctx.current_idx, 2);
-                break;
+        case State::ROTATING_PLAYING:
+            prefetch_renders(ctx.current_idx, 2);
+            break;
 
-            case State::SINGLE_PLAYING:
-                if (ctx.pinned_app) {
-                    request_render(ctx.pinned_app);
-                }
-                break;
+        case State::SINGLE_PLAYING:
+            if (ctx.pinned_app) {
+                request_render(ctx.pinned_app);
+            }
+            break;
 
-            default:
-                break;
+        default:
+            break;
         }
     }
 
@@ -388,20 +403,21 @@ namespace {
         if (ctx.paused) return;
 
         switch (ctx.state) {
-            case State::ROTATING_PLAYING:
-                advance_to_next();
-                break;
+        case State::ROTATING_PLAYING:
+            advance_to_next();
+            break;
 
-            case State::SINGLE_PLAYING:
-                if (ctx.pinned_app && app_is_qualified(ctx.pinned_app)) {
-                    play_app(ctx.pinned_app);
-                } else if (ctx.pinned_app) {
-                    enter_single_blank(ctx.pinned_app);
-                }
-                break;
+        case State::SINGLE_PLAYING:
+            if (ctx.pinned_app && app_is_qualified(ctx.pinned_app)) {
+                play_app(ctx.pinned_app);
+            }
+            else if (ctx.pinned_app) {
+                enter_single_blank(ctx.pinned_app);
+            }
+            break;
 
-            default:
-                break;
+        default:
+            break;
         }
     }
 
@@ -411,34 +427,34 @@ namespace {
         ESP_LOGW(TAG, "Player error");
 
         switch (ctx.state) {
-            case State::ROTATING_PLAYING:
-                advance_to_next();
-                break;
+        case State::ROTATING_PLAYING:
+            advance_to_next();
+            break;
 
-            case State::SINGLE_PLAYING:
-                if (ctx.pinned_app) {
-                    enter_single_blank(ctx.pinned_app);
-                }
-                break;
+        case State::SINGLE_PLAYING:
+            if (ctx.pinned_app) {
+                enter_single_blank(ctx.pinned_app);
+            }
+            break;
 
-            default:
-                break;
+        default:
+            break;
         }
     }
 
     void webp_player_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
         switch (event_id) {
-            case WEBP_PLAYER_EVT_PLAYING:
-                on_playing(static_cast<webp_player_playing_evt_t*>(event_data));
-                break;
-            case WEBP_PLAYER_EVT_STOPPED:
-                on_stopped();
-                break;
-            case WEBP_PLAYER_EVT_ERROR:
-                on_error(static_cast<webp_player_error_evt_t*>(event_data));
-                break;
-            default:
-                break;
+        case WEBP_PLAYER_EVT_PLAYING:
+            on_playing(static_cast<webp_player_playing_evt_t*>(event_data));
+            break;
+        case WEBP_PLAYER_EVT_STOPPED:
+            on_stopped();
+            break;
+        case WEBP_PLAYER_EVT_ERROR:
+            on_error(static_cast<webp_player_error_evt_t*>(event_data));
+            break;
+        default:
+            break;
         }
     }
 
@@ -499,8 +515,8 @@ void scheduler_pause() {
 
     ctx.paused = true;
     stop_timers();
-    webp_player_stop();   // stop decoding -> player task goes idle (~0 CPU)
-    clear_screen();       // blank the framebuffer
+    webp_player_stop();
+    clear_screen();
     transition_to(State::IDLE);
 }
 
@@ -509,7 +525,7 @@ void scheduler_resume() {
     if (!lock || !ctx.paused) return;
 
     ctx.paused = false;
-    evaluate_schedule();  // re-derive playback from the current schedule
+    evaluate_schedule();
 }
 
 void scheduler_deinit() {
@@ -559,38 +575,38 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displa
     }
 
     switch (ctx.state) {
-        case State::ROTATING_WAITING: {
-            int idx = find_next_qualified(0, false);
-            if (idx >= 0) {
-                enter_rotating_playing(static_cast<size_t>(idx));
-            }
-            break;
+    case State::ROTATING_WAITING: {
+        int idx = find_next_qualified(0, false);
+        if (idx >= 0) {
+            enter_rotating_playing(static_cast<size_t>(idx));
         }
+        break;
+    }
 
-        case State::ROTATING_PLAYING: {
-            App_t* current = apps_get_by_index(ctx.current_idx);
-            if (current && !app_is_qualified(current)) {
-                advance_to_next();
-            }
-            break;
+    case State::ROTATING_PLAYING: {
+        App_t* current = apps_get_by_index(ctx.current_idx);
+        if (current && !app_is_qualified(current)) {
+            advance_to_next();
         }
+        break;
+    }
 
-        case State::SINGLE_BLANK: {
-            if (ctx.pinned_app && app_is_qualified(ctx.pinned_app)) {
-                enter_single_playing(ctx.pinned_app);
-            }
-            break;
+    case State::SINGLE_BLANK: {
+        if (ctx.pinned_app && app_is_qualified(ctx.pinned_app)) {
+            enter_single_playing(ctx.pinned_app);
         }
+        break;
+    }
 
-        case State::SINGLE_PLAYING: {
-            if (ctx.pinned_app && !displayable) {
-                enter_single_blank(ctx.pinned_app);
-            }
-            break;
+    case State::SINGLE_PLAYING: {
+        if (ctx.pinned_app && !displayable) {
+            enter_single_blank(ctx.pinned_app);
         }
+        break;
+    }
 
-        default:
-            break;
+    default:
+        break;
     }
 }
 
@@ -619,18 +635,18 @@ void scheduler_on_disconnect() {
 
 const uint8_t* scheduler_get_current_uuid() {
     switch (ctx.state) {
-        case State::SINGLE_PLAYING:
-        case State::SINGLE_BLANK:
-            return ctx.pinned_app ? ctx.pinned_app->uuid : nullptr;
+    case State::SINGLE_PLAYING:
+    case State::SINGLE_BLANK:
+        return ctx.pinned_app ? ctx.pinned_app->uuid : nullptr;
 
-        case State::ROTATING_PLAYING:
-        case State::ROTATING_WAITING: {
-            App_t* app = apps_get_by_index(ctx.current_idx);
-            return app ? app->uuid : nullptr;
-        }
+    case State::ROTATING_PLAYING:
+    case State::ROTATING_WAITING: {
+        App_t* app = apps_get_by_index(ctx.current_idx);
+        return app ? app->uuid : nullptr;
+    }
 
-        default:
-            return nullptr;
+    default:
+        return nullptr;
     }
 }
 

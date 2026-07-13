@@ -67,9 +67,6 @@ void msg_send_device_config() {
     device_cfg.auto_brightness_enabled = cfg.auto_brightness_enabled;
     device_cfg.screen_off_lux = cfg.screen_off_lux;
     device_cfg.is_quiet_now = config_is_quiet_now();
-
-    // Quiet-hours windows (packed synchronously by msg_queue, so stack storage
-    // is valid for the lifetime of this call).
     uint8_t count = cfg.quiet_window_count;
     if (count > MATRX_MAX_QUIET_WINDOWS) count = MATRX_MAX_QUIET_WINDOWS;
 

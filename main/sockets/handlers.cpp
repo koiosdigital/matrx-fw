@@ -40,10 +40,9 @@ namespace {
         new_cfg.screen_off_lux = (cfg->screen_off_lux <= 65535)
             ? static_cast<uint16_t>(cfg->screen_off_lux) : new_cfg.screen_off_lux;
 
-        // Quiet-hours windows (is_quiet_now is device-computed and ignored here).
         new_cfg.quiet_window_count = 0;
         for (size_t i = 0; i < cfg->n_quiet_windows
-                 && new_cfg.quiet_window_count < MATRX_MAX_QUIET_WINDOWS; i++) {
+            && new_cfg.quiet_window_count < MATRX_MAX_QUIET_WINDOWS; i++) {
             const Kd__V1__MatrxQuietWindow* w = cfg->quiet_windows[i];
             if (w == nullptr) continue;
 

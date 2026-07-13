@@ -1,8 +1,3 @@
-// Thin app layer over koios-sdk's cloudlink: matrx-specific protobuf
-// dispatch, connection sprites, and the schedule-request retry loop.
-// Connection lifecycle (backoff, welcome, token, failure cascade) lives
-// in the SDK.
-
 #include "sockets.h"
 #include "handlers.h"
 #include "messages.h"
@@ -39,7 +34,6 @@ namespace {
         .allocator_data = nullptr,
     };
 
-    // Retry schedule requests until the server delivers one.
     esp_timer_handle_t schedule_retry_timer = nullptr;
     int schedule_retry_count = 0;
     constexpr int64_t SCHEDULE_RETRY_BASE_US = 10 * 1000 * 1000;
@@ -76,9 +70,6 @@ namespace {
     }
 
     void on_session_ready() {
-        // Advertise the platform-assigned device UUID (from the welcome
-        // frame) alongside the existing _koiosdigital service TXT records
-        // (model/type/version).
         char device_id[48];
         if (koios_cloudlink_get_device_id(device_id, sizeof(device_id))) {
             kd_common_mdns_add_svc_record("_koiosdigital", "device_id", device_id);
@@ -111,7 +102,7 @@ namespace {
         }
     }
 
-}  // namespace
+}
 
 void sockets_init() {
     esp_timer_create_args_t schedule_retry_args = {
@@ -130,8 +121,6 @@ void sockets_init() {
     cfg.on_session_ready = on_session_ready;
     cfg.on_disconnect = on_disconnect;
     cfg.on_message = on_message;
-    // Class (chip) and project (IDF project name) are reported by the SDK; we
-    // only supply the build variant.
     cfg.variant = FIRMWARE_VARIANT;
     koios_cloudlink_init(&cfg);
 }

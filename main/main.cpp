@@ -40,7 +40,7 @@ extern "C" void app_main(void)
     }
 
     show_fs_sprite("boot");
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     ret = daughterboard_init();
     if (ret != ESP_OK) {
@@ -73,12 +73,6 @@ extern "C" void app_main(void)
 
         perform_factory_reset("button hold");
     }
-
-#ifdef CONFIG_KD_COMMON_CRYPTO_ENABLE
-    if (kd_common_crypto_will_generate_key()) {
-        show_fs_sprite("keygen");
-    }
-#endif
 
     kd_common_init();
     kd_common_set_device_info(FIRMWARE_VARIANT, "matrx");

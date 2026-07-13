@@ -47,6 +47,7 @@ namespace {
             .oe = CONFIG_OE_PIN,
             .clk = CONFIG_CLK_PIN
         },
+        .output_clock_speed = Hub75ClockSpeed::HZ_20M,
         .gpio_drive_strength = 1,
     };
 
