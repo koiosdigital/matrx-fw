@@ -6,14 +6,14 @@ cmake_minimum_required(VERSION 3.16)
 IF(DEFINED ENV{BUILD_VERSION})
 set(PROJECT_VER $ENV{BUILD_VERSION})
 ELSE()
-set(PROJECT_VER "0.0.1")
+set(PROJECT_VER "1.0.0")
 ENDIF()
 
 
 IF(DEFINED ENV{BUILD_VARIANT})
     set(BUILD_VARIANT $ENV{BUILD_VARIANT})
 ELSE()
-    set(BUILD_VARIANT "devel")
+    set(BUILD_VARIANT "matrx_v9_64x128")
 ENDIF()
 
 message("Building version ${PROJECT_VER} for variant ${BUILD_VARIANT}")
