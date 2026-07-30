@@ -77,6 +77,8 @@ extern "C" void app_main(void)
     kd_common_init();
     kd_common_set_device_info(FIRMWARE_VARIANT, "matrx");
 
+    display_register_console_cmds();
+
     koios_ota_init(nullptr);
 
     apps_init();

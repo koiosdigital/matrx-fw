@@ -77,7 +77,7 @@ constexpr uint16_t OE_CLEAR_MASK = ~(1 << OE_BIT);
 GdmaDma::GdmaDma(const Hub75Config &config)
     : PlatformDma(config),
       dma_chan_(nullptr),
-      bit_depth_(HUB75_BIT_DEPTH),
+      bit_depth_(resolve_bit_depth(config)),
       lsbMsbTransitionBit_(0),
       panel_width_(config.panel_width),
       panel_height_(config.panel_height),
@@ -603,8 +603,8 @@ HUB75_IRAM void GdmaDma::draw_pixels(uint16_t x, uint16_t y, uint16_t w, uint16_
           const uint16_t lr_c = lut_[lr], lg_c = lut_[lg], lb_c = lut_[lb];
 
           uint8_t *plane_ptr = base_ptr;
-          // HUB75_BIT_DEPTH is a compile-time constant: loop fully unrolls
-          for (int bit = 0; bit < HUB75_BIT_DEPTH; bit++) {
+          // Runtime bit depth (config-selectable); small fixed-bound loop
+          for (int bit = 0; bit < bit_depth_; bit++) {
             uint16_t *buf = (uint16_t *) plane_ptr;
             const uint16_t rgb = (((ur_c >> bit) & 1) << R1_BIT) | (((ug_c >> bit) & 1) << G1_BIT) |
                                  (((ub_c >> bit) & 1) << B1_BIT) | (((lr_c >> bit) & 1) << R2_BIT) |
@@ -653,7 +653,7 @@ HUB75_IRAM void GdmaDma::draw_pixels(uint16_t x, uint16_t y, uint16_t w, uint16_
         HUB75_PROFILE_STAGE(PROFILE_LUT);
 
         uint8_t *plane_ptr = base_ptr;
-        for (int bit = 0; bit < HUB75_BIT_DEPTH; bit++) {
+        for (int bit = 0; bit < bit_depth_; bit++) {
           uint16_t *buf = (uint16_t *) plane_ptr;
           const uint16_t rgb = (((r_corrected >> bit) & 1) << r_shift) | (((g_corrected >> bit) & 1) << g_shift) |
                                (((b_corrected >> bit) & 1) << b_shift);
@@ -703,7 +703,7 @@ HUB75_IRAM void GdmaDma::draw_pixels(uint16_t x, uint16_t y, uint16_t w, uint16_
 
       // Branchless bit-plane update using shift+and (avoids ternary branches on Xtensa)
       uint8_t *base_ptr = target_buffers[row].data;
-      for (int bit = 0; bit < HUB75_BIT_DEPTH; bit++) {
+      for (int bit = 0; bit < bit_depth_; bit++) {
         uint16_t *buf = (uint16_t *) (base_ptr + (bit * bit_plane_stride));
 
         // Extract single bits (0 or 1) without branches using shift+and
@@ -779,8 +779,8 @@ HUB75_IRAM void GdmaDma::fill(uint16_t x, uint16_t y, uint16_t w, uint16_t h, ui
 
   // Pre-compute bit patterns for all bit planes (ONCE for entire fill)
   // This eliminates per-pixel bit extraction and conditional logic
-  uint16_t upper_patterns[HUB75_BIT_DEPTH];
-  uint16_t lower_patterns[HUB75_BIT_DEPTH];
+  uint16_t upper_patterns[HUB75_MAX_BIT_DEPTH];
+  uint16_t lower_patterns[HUB75_MAX_BIT_DEPTH];
   for (int bit = 0; bit < bit_depth_; bit++) {
     const uint16_t mask = (1 << bit);
     upper_patterns[bit] = ((r_corrected & mask) ? (1 << R1_BIT) : 0) | ((g_corrected & mask) ? (1 << G1_BIT) : 0) |

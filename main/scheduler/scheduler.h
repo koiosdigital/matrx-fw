@@ -15,6 +15,7 @@ extern "C" {
 
     void scheduler_pause(void);
     void scheduler_resume(void);
+    bool scheduler_is_paused(void);
 
     bool scheduler_has_schedule(void);
 

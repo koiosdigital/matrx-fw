@@ -131,7 +131,8 @@ namespace {
         if (!ab_state.initialized) {
             ab_state.smoothed_lux = lux;
             ab_state.initialized = true;
-        } else {
+        }
+        else {
             ab_state.smoothed_lux = ab_state.smoothed_lux * (1.0f - SMOOTHING_FACTOR)
                 + lux * SMOOTHING_FACTOR;
         }
@@ -143,10 +144,12 @@ namespace {
             if (ab_state.smoothed_lux >= screen_on_threshold) {
                 ab_state.screen_is_off = false;
                 config_set_ambient_screen_off(false);
-            } else {
+            }
+            else {
                 return;
             }
-        } else {
+        }
+        else {
             if (ab_state.smoothed_lux < screen_off_threshold) {
                 ab_state.screen_is_off = true;
                 config_set_ambient_screen_off(true);
@@ -222,7 +225,7 @@ esp_err_t daughterboard_init() {
     gpio_config_t btn_cfg = {
         .pin_bit_mask = (1ULL << BUTTON_GPIOS[0]) | (1ULL << BUTTON_GPIOS[1]) | (1ULL << BUTTON_GPIOS[2]),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_NEGEDGE,
     };

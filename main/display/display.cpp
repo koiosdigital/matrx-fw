@@ -15,12 +15,15 @@
 #include <kd_console.h>
 #include <esp_heap_caps.h>
 #include <driver/gpio.h>
+#include <nvs_flash.h>
+#include <nvs.h>
 
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
 
 #include "sockets.h"
+#include "scheduler.h"
 #include "hub75.h"
 
 static const char* TAG = "display";
@@ -52,6 +55,112 @@ namespace {
     };
 
     Hub75Driver dma_display(display_cfg);
+
+    // ---- Panel hardware tuning, persisted in NVS (survives factory reset) ----
+    constexpr const char* HW_NVS_NAMESPACE = "disp_hw";
+    constexpr const char* HW_KEY_COLOR_ORDER = "color_order";  // u8: 0=rgb, 1=bgr (R/B swapped panel)
+    constexpr const char* HW_KEY_BIT_DEPTH = "bit_depth";      // u8: 4-12, 0=compile default
+    constexpr const char* HW_KEY_CLK_MHZ = "clk_mhz";          // u8: 8|10|16|20|32, 0=default (20)
+
+    // Panel color order: false = normal panel (default), true = R/B swapped.
+    bool g_panel_bgr = false;
+
+    // Buffer color order handed to draw_pixels. On a normal panel the webp
+    // RGBA paths use BGR (matches the driver's byte layout for RGB888_32) and
+    // the packed-RGB path uses RGB; a swapped panel flips both.
+    inline Hub75ColorOrder rgba_draw_order() {
+        return g_panel_bgr ? Hub75ColorOrder::RGB : Hub75ColorOrder::BGR;
+    }
+    inline Hub75ColorOrder rgb_draw_order() {
+        return g_panel_bgr ? Hub75ColorOrder::BGR : Hub75ColorOrder::RGB;
+    }
+
+    bool clock_speed_from_mhz(int mhz, Hub75ClockSpeed* out) {
+        switch (mhz) {
+        case 8:  *out = Hub75ClockSpeed::HZ_8M;  return true;
+        case 10: *out = Hub75ClockSpeed::HZ_10M; return true;
+        case 16: *out = Hub75ClockSpeed::HZ_16M; return true;
+        case 20: *out = Hub75ClockSpeed::HZ_20M; return true;
+        case 32: *out = Hub75ClockSpeed::HZ_32M; return true;
+        default: return false;
+        }
+    }
+
+    void hw_settings_load() {
+        // display_init runs before kd_common_init, so bring NVS up ourselves;
+        // nvs_flash_init is idempotent. On failure just use defaults.
+        esp_err_t err = nvs_flash_init();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "NVS init: %s, using default panel settings", esp_err_to_name(err));
+            return;
+        }
+
+        nvs_handle_t h;
+        if (nvs_open(HW_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+
+        uint8_t v = 0;
+        if (nvs_get_u8(h, HW_KEY_COLOR_ORDER, &v) == ESP_OK) {
+            g_panel_bgr = (v != 0);
+        }
+        if (nvs_get_u8(h, HW_KEY_BIT_DEPTH, &v) == ESP_OK && v >= 4 && v <= 12) {
+            display_cfg.bit_depth = v;
+        }
+        if (nvs_get_u8(h, HW_KEY_CLK_MHZ, &v) == ESP_OK) {
+            Hub75ClockSpeed speed;
+            if (clock_speed_from_mhz(v, &speed)) {
+                display_cfg.output_clock_speed = speed;
+            }
+        }
+        nvs_close(h);
+
+        ESP_LOGI(TAG, "Panel settings: color_order=%s bit_depth=%u clk=%luMHz",
+                 g_panel_bgr ? "bgr" : "rgb",
+                 display_cfg.bit_depth ? display_cfg.bit_depth : HUB75_BIT_DEPTH,
+                 (unsigned long)((uint32_t)display_cfg.output_clock_speed / 1000000));
+    }
+
+    bool hw_setting_save(const char* key, uint8_t value) {
+        nvs_handle_t h;
+        if (nvs_open(HW_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+        bool ok = (nvs_set_u8(h, key, value) == ESP_OK) && (nvs_commit(h) == ESP_OK);
+        nvs_close(h);
+        if (!ok) ESP_LOGE(TAG, "Failed to save %s to NVS", key);
+        return ok;
+    }
+
+    // Tear down the HUB75 driver and re-create it from the current display_cfg.
+    // Quiesces the render pipeline first so nothing draws into the DMA engine
+    // mid-teardown; restores the scheduler unless something else (quiet hours)
+    // had already paused it.
+    bool display_reinit() {
+#if CONFIG_DISPLAY_ENABLED
+        bool was_paused = scheduler_is_paused();
+        scheduler_pause();
+
+        // Wait for the webp player task to finish any in-flight frame.
+        for (int i = 0; i < 100 && webp_player_is_playing(); i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+
+        display_cfg.brightness = dma_display.get_brightness();
+        dma_display.end();
+        dma_display.set_config(display_cfg);
+        bool ok = dma_display.begin();
+        if (ok) {
+            dma_display.clear();
+        } else {
+            ESP_LOGE(TAG, "Display re-init failed");
+        }
+
+        if (!was_paused) {
+            scheduler_resume();
+        }
+        return ok;
+#else
+        return false;
+#endif
+    }
 
     constexpr TickType_t BOOT_SPRITE_DELAY_MS = 1200;
 
@@ -178,10 +287,76 @@ namespace {
         }
     }
 
+#ifdef CONFIG_KD_COMMON_CONSOLE_ENABLE
+
+    int cmd_set_color_order(int argc, char** argv) {
+        if (argc < 2) {
+            printf("color_order: %s\nusage: set_color_order <rgb|bgr>\n",
+                g_panel_bgr ? "bgr" : "rgb");
+            return 0;
+        }
+
+        bool bgr;
+        if (strcmp(argv[1], "rgb") == 0) bgr = false;
+        else if (strcmp(argv[1], "bgr") == 0) bgr = true;
+        else {
+            printf("invalid color order '%s' (rgb|bgr)\n", argv[1]);
+            return 1;
+        }
+
+        g_panel_bgr = bgr;
+        hw_setting_save(HW_KEY_COLOR_ORDER, bgr ? 1 : 0);
+        printf("color_order = %s (applied to subsequent frames)\n", bgr ? "bgr" : "rgb");
+        return 0;
+    }
+
+    int cmd_set_bit_depth(int argc, char** argv) {
+        if (argc < 2) {
+            printf("bit_depth: %u (0 = compile default %u)\nusage: set_bit_depth <4-12>\n",
+                display_cfg.bit_depth, HUB75_BIT_DEPTH);
+            return 0;
+        }
+
+        int depth = atoi(argv[1]);
+        if (depth < 4 || depth > 12) {
+            printf("bit depth must be 4-12\n");
+            return 1;
+        }
+
+        display_cfg.bit_depth = static_cast<uint8_t>(depth);
+        hw_setting_save(HW_KEY_BIT_DEPTH, static_cast<uint8_t>(depth));
+        printf("bit_depth = %d, re-initializing display...\n", depth);
+        return display_reinit() ? 0 : 1;
+    }
+
+    int cmd_set_clock_speed(int argc, char** argv) {
+        if (argc < 2) {
+            printf("clock_speed: %luMHz\nusage: set_clock_speed <8|10|16|20|32>\n",
+                (unsigned long)((uint32_t)display_cfg.output_clock_speed / 1000000));
+            return 0;
+        }
+
+        int mhz = atoi(argv[1]);
+        Hub75ClockSpeed speed;
+        if (!clock_speed_from_mhz(mhz, &speed)) {
+            printf("clock speed must be 8, 10, 16, 20 or 32 (MHz)\n");
+            return 1;
+        }
+
+        display_cfg.output_clock_speed = speed;
+        hw_setting_save(HW_KEY_CLK_MHZ, static_cast<uint8_t>(mhz));
+        printf("clock_speed = %dMHz, re-initializing display...\n", mhz);
+        return display_reinit() ? 0 : 1;
+    }
+
+#endif  // CONFIG_KD_COMMON_CONSOLE_ENABLE
+
 }  // namespace
 
 void display_init() {
 #if CONFIG_DISPLAY_ENABLED
+    hw_settings_load();
+    dma_display.set_config(display_cfg);
     dma_display.begin();
     dma_display.set_brightness(32);
     dma_display.clear();
@@ -193,6 +368,17 @@ void display_init() {
         prov_event_handler, nullptr);
     esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START,
         wifi_event_handler, nullptr);
+}
+
+void display_register_console_cmds() {
+#ifdef CONFIG_KD_COMMON_CONSOLE_ENABLE
+    kd_console_register_cmd("set_color_order",
+        "Panel color order (rgb|bgr), stored to NVS, applies live", cmd_set_color_order);
+    kd_console_register_cmd("set_bit_depth",
+        "Panel color bit depth 4-12 (0 arg prints current), stored to NVS, re-inits display", cmd_set_bit_depth);
+    kd_console_register_cmd("set_clock_speed",
+        "HUB75 clock speed in MHz (8|10|16|20|32), stored to NVS, re-inits display", cmd_set_clock_speed);
+#endif
 }
 
 void display_deinit() {
@@ -208,7 +394,7 @@ void display_render_rgba_frame(const uint8_t* rgba_frame, int width, int height)
     if (height > CONFIG_MATRIX_HEIGHT) height = CONFIG_MATRIX_HEIGHT;
 
     dma_display.draw_pixels(0, 0, static_cast<uint16_t>(width), static_cast<uint16_t>(height),
-        rgba_frame, Hub75PixelFormat::RGB888_32, Hub75ColorOrder::BGR);
+        rgba_frame, Hub75PixelFormat::RGB888_32, rgba_draw_order());
 #endif
 }
 
@@ -220,7 +406,7 @@ void display_render_rgba_span(const uint8_t* rgba_span, int x, int y, int width)
 
     dma_display.draw_pixels(static_cast<uint16_t>(x), static_cast<uint16_t>(y),
         static_cast<uint16_t>(width), 1,
-        rgba_span, Hub75PixelFormat::RGB888_32, Hub75ColorOrder::BGR);
+        rgba_span, Hub75PixelFormat::RGB888_32, rgba_draw_order());
 #endif
 }
 
@@ -231,7 +417,7 @@ void display_render_rgb_buffer(const uint8_t* rgb_buffer, size_t buffer_len) {
     }
 
     dma_display.draw_pixels(0, 0, CONFIG_MATRIX_WIDTH, CONFIG_MATRIX_HEIGHT,
-        rgb_buffer, Hub75PixelFormat::RGB888);
+        rgb_buffer, Hub75PixelFormat::RGB888, rgb_draw_order());
 #endif
 }
 

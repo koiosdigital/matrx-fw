@@ -57,6 +57,16 @@ class Hub75Driver {
    */
   void end();
 
+  /**
+   * @brief Replace the driver configuration (driver must be stopped)
+   * @param config New configuration, applied on the next begin()
+   * @return true if accepted, false if the driver is still running
+   *
+   * Call end() first, then set_config() + begin() to re-initialize with new
+   * hardware parameters (clock speed, bit depth, panel geometry, ...).
+   */
+  bool set_config(const Hub75Config &config);
+
   // ========================================================================
   // Pixel Drawing API
   // ========================================================================

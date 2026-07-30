@@ -528,6 +528,10 @@ void scheduler_resume() {
     evaluate_schedule();
 }
 
+bool scheduler_is_paused() {
+    return ctx.paused;
+}
+
 void scheduler_deinit() {
     enter_idle();
 

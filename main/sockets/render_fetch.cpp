@@ -23,7 +23,7 @@ namespace {
     constexpr size_t QUEUE_DEPTH = 16;
     constexpr size_t MAX_RENDER_SIZE = 512 * 1024;
     constexpr size_t INITIAL_BUF_SIZE = 32 * 1024;
-    constexpr uint32_t WORKER_STACK = 10240;
+    constexpr uint32_t WORKER_STACK = 6 * 1024;
     constexpr UBaseType_t WORKER_PRIO = 10;
     constexpr BaseType_t WORKER_CORE = 0;
 
