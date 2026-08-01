@@ -958,7 +958,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 # default:
 CONFIG_MATRIX_WIDTH=64
 # default:
-CONFIG_MATRIX_HEIGHT=32
+CONFIG_MATRIX_HEIGHT=64
 # default:
 CONFIG_DISPLAY_ENABLED=y
 # default:
@@ -1050,6 +1050,13 @@ CONFIG_KD_COMMON_SRP_FORMAT_NUMERIC_6=y
 # default:
 # CONFIG_KD_COMMON_SRP_FORMAT_NUMERIC_4 is not set
 # end of Provisioning Configuration
+
+#
+# Ethernet Configuration
+#
+# default:
+# CONFIG_KD_COMMON_ETH_ENABLE is not set
+# end of Ethernet Configuration
 # end of KD Common Configuration
 
 #
