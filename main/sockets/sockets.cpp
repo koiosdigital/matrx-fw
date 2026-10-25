@@ -78,6 +78,7 @@ namespace {
         scheduler_on_connect();
         msg_send_device_info();
         msg_send_claim_if_needed();
+        msg_send_cert_report();
 
         schedule_retry_count = 0;
         if (schedule_retry_timer) {
@@ -89,6 +90,15 @@ namespace {
     void on_disconnect() {
         if (schedule_retry_timer) esp_timer_stop(schedule_retry_timer);
         scheduler_on_disconnect();
+    }
+
+    void on_timezone(const char* tz) {
+        // Quiet windows are evaluated in device-local wall-clock, so the device
+        // must adopt the cloud-provided IANA timezone. This overrides the
+        // IP-geolocation fallback (and disables auto-fetch) with an authoritative value.
+        if (!tz || !tz[0]) return;
+        ESP_LOGI(TAG, "Applying cloud timezone: %s", tz);
+        kd_common_set_timezone(tz);
     }
 
     void on_message(const uint8_t* data, size_t len) {
@@ -121,6 +131,7 @@ void sockets_init() {
     cfg.on_session_ready = on_session_ready;
     cfg.on_disconnect = on_disconnect;
     cfg.on_message = on_message;
+    cfg.on_timezone = on_timezone;
     cfg.variant = FIRMWARE_VARIANT;
     koios_cloudlink_init(&cfg);
 }

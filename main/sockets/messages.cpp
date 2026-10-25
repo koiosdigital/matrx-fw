@@ -136,3 +136,51 @@ void msg_send_schedule_request() {
 
     MSG_QUEUE_ONE(KD__V1__MATRX_MESSAGE__MESSAGE_SCHEDULE_REQUEST, schedule_request, &req);
 }
+
+void msg_send_cert_report() {
+    size_t cert_len = 0;
+    if (kd_common_get_device_cert(nullptr, &cert_len) != ESP_OK || cert_len == 0) {
+        return;
+    }
+
+    auto* cert = static_cast<char*>(heap_caps_malloc(cert_len + 1, MALLOC_CAP_SPIRAM));
+    if (cert == nullptr) return;
+
+    if (kd_common_get_device_cert(cert, &cert_len) != ESP_OK) {
+        heap_caps_free(cert);
+        return;
+    }
+    cert[cert_len] = '\0';
+
+    Kd__V1__CertReport report = KD__V1__CERT_REPORT__INIT;
+    report.current_cert.data = reinterpret_cast<uint8_t*>(cert);
+    report.current_cert.len = cert_len;
+
+    MSG_QUEUE_ONE(KD__V1__MATRX_MESSAGE__MESSAGE_CERT_REPORT, cert_report, &report);
+    heap_caps_free(cert);
+}
+
+void msg_send_cert_renew_request() {
+    size_t csr_len = 0;
+    if (kd_common_get_csr(nullptr, &csr_len) != ESP_OK || csr_len == 0) {
+        ESP_LOGE(TAG, "No CSR available for cert renewal request");
+        return;
+    }
+
+    auto* csr = static_cast<char*>(heap_caps_malloc(csr_len + 1, MALLOC_CAP_SPIRAM));
+    if (csr == nullptr) return;
+
+    if (kd_common_get_csr(csr, &csr_len) != ESP_OK) {
+        heap_caps_free(csr);
+        return;
+    }
+    csr[csr_len] = '\0';
+
+    Kd__V1__CertRenewRequest req = KD__V1__CERT_RENEW_REQUEST__INIT;
+    req.csr.data = reinterpret_cast<uint8_t*>(csr);
+    req.csr.len = csr_len;
+
+    MSG_QUEUE_ONE(KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RENEW_REQUEST, cert_renew_request, &req);
+    ESP_LOGI(TAG, "Cert renewal CSR sent to server (%zu bytes)", csr_len);
+    heap_caps_free(csr);
+}

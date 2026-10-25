@@ -12,3 +12,5 @@ void msg_send_claim_if_needed();
 void msg_upload_coredump();
 void msg_send_currently_displaying(const App_t* app);
 void msg_send_schedule_request();
+void msg_send_cert_report();
+void msg_send_cert_renew_request();

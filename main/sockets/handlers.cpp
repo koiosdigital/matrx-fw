@@ -3,6 +3,7 @@
 
 #include <esp_log.h>
 #include <kd_common.h>
+#include <kd_crypto.h>
 
 #include "apps.h"
 #include "config.h"
@@ -87,6 +88,45 @@ namespace {
         perform_factory_reset(reason);
     }
 
+    void handle_cert_renew_required(Kd__V1__CertRenewRequired* msg) {
+        ESP_LOGI(TAG, "Server requested cert renewal%s%s",
+            (msg && msg->reason) ? ": " : "",
+            (msg && msg->reason) ? msg->reason : "");
+
+        esp_err_t err = kd_common_crypto_regenerate_csr();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "CSR regeneration failed: %s", esp_err_to_name(err));
+            return;
+        }
+
+        msg_send_cert_renew_request();
+    }
+
+    void handle_cert_renew_response(Kd__V1__CertRenewResponse* msg) {
+        if (msg == nullptr) return;
+
+        if (!msg->success) {
+            ESP_LOGE(TAG, "Cert renewal rejected by server: %s",
+                msg->error ? msg->error : "unknown");
+            return;
+        }
+
+        if (msg->device_cert.data == nullptr || msg->device_cert.len == 0) {
+            ESP_LOGE(TAG, "Cert renewal response has no certificate");
+            return;
+        }
+
+        esp_err_t err = kd_common_set_device_cert(
+            reinterpret_cast<const char*>(msg->device_cert.data),
+            msg->device_cert.len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store renewed cert: %s", esp_err_to_name(err));
+            return;
+        }
+
+        ESP_LOGI(TAG, "Certificate renewed and stored (%zu bytes)", msg->device_cert.len);
+    }
+
     void handle_pin_state_change(Kd__V1__ScheduleItemSetPinState* msg) {
         if (msg == nullptr) return;
         if (!validate_uuid(msg->uuid, "pin state")) return;
@@ -122,6 +162,12 @@ void handle_message(Kd__V1__MatrxMessage* message) {
         break;
     case KD__V1__MATRX_MESSAGE__MESSAGE_FACTORY_RESET_REQUEST:
         handle_factory_reset(message->factory_reset_request);
+        break;
+    case KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RENEW_REQUIRED:
+        handle_cert_renew_required(message->cert_renew_required);
+        break;
+    case KD__V1__MATRX_MESSAGE__MESSAGE_CERT_RENEW_RESPONSE:
+        handle_cert_renew_response(message->cert_renew_response);
         break;
     default:
         break;
