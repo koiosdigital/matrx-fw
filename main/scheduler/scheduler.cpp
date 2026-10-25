@@ -443,6 +443,9 @@ namespace {
     }
 
     void webp_player_event_handler(void*, esp_event_base_t, int32_t event_id, void* event_data) {
+        raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+        if (!lock) return;
+
         switch (event_id) {
         case WEBP_PLAYER_EVT_PLAYING:
             on_playing(static_cast<webp_player_playing_evt_t*>(event_data));
@@ -506,6 +509,8 @@ void scheduler_start() {
 }
 
 void scheduler_stop() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return;
     enter_idle();
 }
 
@@ -556,15 +561,22 @@ void scheduler_deinit() {
 }
 
 bool scheduler_has_schedule() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return false;
     return ctx.state != State::IDLE || apps_count() > 0;
 }
 
 void scheduler_on_schedule_received() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return;
     evaluate_schedule();
 }
 
 void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displayable) {
     if (!uuid) return;
+
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return;
     if (ctx.paused) return;
 
     App_t* app = app_find(uuid);
@@ -617,19 +629,24 @@ void scheduler_on_render_response(const uint8_t* uuid, bool success, bool displa
 void scheduler_on_pin_state_changed(const uint8_t* uuid, bool pinned) {
     if (!uuid) return;
 
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return;
     evaluate_schedule();
 }
 
 void scheduler_on_connect() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return;
     msg_send_schedule_request();
 }
 
 void scheduler_on_disconnect() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return;
+
     stop_timers();
     ctx.pinned_app = nullptr;
 
-    // While paused for quiet hours the screen stays off; don't relight it with
-    // the "connecting" sprite.
     if (!ctx.paused) {
         webp_player_play_embedded("connecting");
     }
@@ -638,6 +655,9 @@ void scheduler_on_disconnect() {
 }
 
 const uint8_t* scheduler_get_current_uuid() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return nullptr;
+
     switch (ctx.state) {
     case State::SINGLE_PLAYING:
     case State::SINGLE_BLANK:
@@ -655,6 +675,8 @@ const uint8_t* scheduler_get_current_uuid() {
 }
 
 void scheduler_next() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return;
     if (ctx.paused) return;
     if (ctx.state != State::ROTATING_PLAYING && ctx.state != State::ROTATING_WAITING) {
         return;
@@ -670,6 +692,8 @@ void scheduler_next() {
 }
 
 void scheduler_prev() {
+    raii::MutexGuard lock(ctx.mutex, pdMS_TO_TICKS(100));
+    if (!lock) return;
     if (ctx.paused) return;
     if (ctx.state != State::ROTATING_PLAYING && ctx.state != State::ROTATING_WAITING) {
         return;

@@ -34,8 +34,14 @@ namespace {
 
         system_config_t new_cfg = config_get();
         new_cfg.screen_enabled = cfg->screen_enabled;
-        new_cfg.screen_brightness = (cfg->screen_brightness <= 255)
-            ? static_cast<uint8_t>(cfg->screen_brightness) : new_cfg.screen_brightness;
+        // Reject 0 as well as out-of-range. proto3 scalars have no field
+        // presence, so a cloud-side config that omits brightness arrives as 0;
+        // applying it would switch the panel "on" at zero brightness and look
+        // like a device ignoring the command. Off is screen_enabled's job.
+        new_cfg.screen_brightness =
+            (cfg->screen_brightness >= 1 && cfg->screen_brightness <= 255)
+                ? static_cast<uint8_t>(cfg->screen_brightness)
+                : new_cfg.screen_brightness;
         new_cfg.auto_brightness_enabled = cfg->auto_brightness_enabled;
         new_cfg.screen_off_lux = (cfg->screen_off_lux <= 65535)
             ? static_cast<uint16_t>(cfg->screen_off_lux) : new_cfg.screen_off_lux;
@@ -85,13 +91,11 @@ namespace {
         if (msg == nullptr) return;
         if (!validate_uuid(msg->uuid, "pin state")) return;
 
-        App_t* app = app_find(msg->uuid.data);
-        if (!app) {
+        if (!app_set_pinned_by_uuid(msg->uuid.data, msg->pinned)) {
             ESP_LOGW(TAG, "App not found for pin state change");
             return;
         }
 
-        app->pinned = msg->pinned;
         scheduler_on_pin_state_changed(msg->uuid.data, msg->pinned);
     }
 

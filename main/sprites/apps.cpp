@@ -248,6 +248,19 @@ bool app_is_qualified(App_t* app) {
     return app->len > 0 && app->displayable && !app->skipped;
 }
 
+bool app_set_pinned_by_uuid(const uint8_t* uuid, bool pinned) {
+    if (!uuid) return false;
+
+    raii::MutexGuard lock(g_apps_mutex);
+    if (!lock) return false;
+
+    int idx = find_app_index_unlocked(uuid);
+    if (idx < 0) return false;
+
+    g_apps[idx]->pinned = pinned;
+    return true;
+}
+
 void app_show(App_t* app) {
     if (!app || !app_is_qualified(app)) {
         return;

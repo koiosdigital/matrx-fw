@@ -43,6 +43,8 @@ extern "C" {
     void app_set_etag(App_t* app, const char* etag);
     bool app_copy_etag_if_has_data(App_t* app, char* out, size_t out_size);
 
+    bool app_set_pinned_by_uuid(const uint8_t* uuid, bool pinned);
+
     void app_show(App_t* app);
     void show_fs_sprite(const char* name);
 
