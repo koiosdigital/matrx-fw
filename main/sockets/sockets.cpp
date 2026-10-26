@@ -9,7 +9,12 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 
+#include <cJSON.h>
 #include <kd_common.h>
+#include <kd_crypto.h>
+#ifdef CONFIG_KD_COMMON_CONSOLE_ENABLE
+#include <kd_console.h>
+#endif
 #include <koios/cloudlink.h>
 #include <kd/v1/matrx.pb-c.h>
 
@@ -112,6 +117,104 @@ namespace {
         }
     }
 
+    char* on_cert_renew_csr() {
+        esp_err_t err = kd_common_crypto_regenerate_csr();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "CSR regeneration failed: %s", esp_err_to_name(err));
+            return nullptr;
+        }
+
+        size_t csr_len = 0;
+        if (kd_common_get_csr(nullptr, &csr_len) != ESP_OK || csr_len == 0) {
+            ESP_LOGE(TAG, "No CSR available after regeneration");
+            return nullptr;
+        }
+
+        auto* csr = static_cast<char*>(malloc(csr_len + 1));
+        if (!csr) return nullptr;
+
+        if (kd_common_get_csr(csr, &csr_len) != ESP_OK) {
+            free(csr);
+            return nullptr;
+        }
+        csr[csr_len] = '\0';
+        return csr;
+    }
+
+    void on_cert_renewed(const char* cert_pem, const char* chain_pem) {
+        if (!cert_pem) return;
+
+        // Store the full chain (leaf + issuing intermediates), not just the
+        // leaf: edge mTLS validates the device against the platform root, so
+        // the device must present the intermediates in its TLS handshake to
+        // build a path to that root. chain_pem is leaf-first and complete;
+        // fall back to the bare leaf only if the server omitted it.
+        const char* to_store = (chain_pem && chain_pem[0]) ? chain_pem : cert_pem;
+        size_t len = strlen(to_store);
+
+        esp_err_t err = kd_common_set_device_cert(to_store, len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store renewed cert: %s", esp_err_to_name(err));
+            return;
+        }
+        ESP_LOGI(TAG, "Renewed certificate stored (%zu bytes, %s)", len,
+            to_store == chain_pem ? "fullchain" : "leaf only");
+    }
+
+    int cmd_test_cert_renew(int argc, char** argv) {
+        if (!koios_cloudlink_is_ready()) {
+            printf("[ERROR] Not connected to cloud\n");
+            return 1;
+        }
+
+        esp_err_t err = kd_common_crypto_regenerate_csr();
+        if (err != ESP_OK) {
+            printf("[ERROR] CSR regeneration failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+
+        size_t csr_len = 0;
+        if (kd_common_get_csr(nullptr, &csr_len) != ESP_OK || csr_len == 0) {
+            printf("[ERROR] No CSR available\n");
+            return 1;
+        }
+
+        auto* csr = static_cast<char*>(malloc(csr_len + 1));
+        if (!csr) {
+            printf("[ERROR] Allocation failed\n");
+            return 1;
+        }
+
+        if (kd_common_get_csr(csr, &csr_len) != ESP_OK) {
+            free(csr);
+            printf("[ERROR] Failed to read CSR\n");
+            return 1;
+        }
+        csr[csr_len] = '\0';
+
+        cJSON* req = cJSON_CreateObject();
+        if (!req) { free(csr); return 1; }
+        cJSON_AddStringToObject(req, "type", "cert.renew_request");
+        cJSON_AddStringToObject(req, "csr", csr);
+        free(csr);
+
+        char* json = cJSON_PrintUnformatted(req);
+        cJSON_Delete(req);
+        if (!json) {
+            printf("[ERROR] JSON serialization failed\n");
+            return 1;
+        }
+
+        bool sent = koios_cloudlink_send_text(json);
+        cJSON_free(json);
+        if (sent) {
+            printf("[OK] Cert renewal request sent; watch for cert.renew_response\n");
+        } else {
+            printf("[ERROR] Failed to queue renewal request\n");
+        }
+        return sent ? 0 : 1;
+    }
+
 }
 
 void sockets_init() {
@@ -132,8 +235,16 @@ void sockets_init() {
     cfg.on_disconnect = on_disconnect;
     cfg.on_message = on_message;
     cfg.on_timezone = on_timezone;
+    cfg.on_cert_renew_csr = on_cert_renew_csr;
+    cfg.on_cert_renewed = on_cert_renewed;
     cfg.variant = FIRMWARE_VARIANT;
     koios_cloudlink_init(&cfg);
+
+#ifdef CONFIG_KD_COMMON_CONSOLE_ENABLE
+    kd_console_register_cmd("test_cert_renew",
+        "Send a cert renewal request to the server (requires active session)",
+        cmd_test_cert_renew);
+#endif
 }
 
 void sockets_deinit() {
