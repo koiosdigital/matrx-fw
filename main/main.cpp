@@ -12,6 +12,7 @@
 
 #include "kd_common.h"
 #include <koios/ota.h>
+#include <koios/logship.h>
 
 #include "display.h"
 #include "webp_player.h"
@@ -80,6 +81,7 @@ extern "C" void app_main(void)
     display_register_console_cmds();
 
     koios_ota_init(nullptr);
+    koios_logship_init(nullptr);  // opt-in via CONFIG_KOIOS_SDK_LOGS_ENABLE
 
     apps_init();
 
